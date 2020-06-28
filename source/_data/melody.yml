@@ -17,10 +17,10 @@ theme_color:
 
 # Main menu navigation
 menu:
-  Home: /
-  Archives: /archives
-  Tags: /tags
-  Categories: /categories
+  主页: /
+  文章: /archives
+  标签: /tags
+  分类: /categories
   #XXX: /xxx
 
 # Favicon
