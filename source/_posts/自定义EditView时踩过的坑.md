@@ -1,7 +1,7 @@
 ---
 title: 自定义EditView时踩过的坑
 date: 2020-10-19 12:05:34
-tags:
+tags: 自定义View
 ---
 
 # 简介
