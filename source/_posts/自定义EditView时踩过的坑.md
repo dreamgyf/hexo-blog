@@ -46,15 +46,13 @@ tags: 自定义View
 
 > public CharSequence filter(CharSequence source, int start, int end,Spanned dest, int dstart, int dend);
 
-其中，source参数便是在用户输入之后，触发回调之前的字符串，我们可以对他进行处理，返回处理后的字符串来满足长度限制的需求。
+其中，InputFilter已经内置实现了长度过滤功能，只需要在设置新answer的时候，重新`setFilters()`就行了
 
 ```java
-public CharSequence filter(CharSequence source, int start, int end, Spanned dest, int dstart, int dend) {
-    if (source.length() > getLength()) {
-		return source.subSequence(0, getLength());
-	}
-	return source;
-}
+InputFilter[] filters = new InputFilter[]{
+		new InputFilter.LengthFilter(answer.length())
+};
+setFilters(filters);
 ```
 
 # 具体的绘制实现？
