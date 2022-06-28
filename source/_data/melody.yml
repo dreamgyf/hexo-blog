@@ -53,6 +53,7 @@ highlight_theme: default
 # ---------------
 social:
   github fa: https://github.com/dreamgyf
+  # maxcdn fa: https://juejin.cn/user/501033033793543
 
 # Algolia search
 # ---------------
