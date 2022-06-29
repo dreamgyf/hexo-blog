@@ -671,7 +671,7 @@ int binder_alloc_mmap_handler(struct binder_alloc *alloc,
 
 当完成物理内存的映射后，以32位系统，缓冲区大小4M为例，效果应该如下图所示：
 
-![binder_mmap](https://p9-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/bb977816ebe74b14a9172572af88df76~tplv-k3u1fbpfcp-watermark.image?)
+![binder_mmap](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E9%A9%B1%E5%8A%A8%EF%BC%88%E4%B8%8A%EF%BC%89_mmap.png)
 
 # 总结
 

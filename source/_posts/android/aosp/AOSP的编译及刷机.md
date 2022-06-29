@@ -80,13 +80,13 @@ AOSP代码下载是个漫长的过程，需要耐心等待
 
 在<https://developers.google.com/android/drivers?hl=zh-cn>这个网站可以找到Nexus、Pixel系列的驱动，要注意每个驱动后面会有一串代号，需要和你下载的AOSP源码的build号相对应
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/42ca0ef81bc34673ae00b33fe63e1ee6~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E4%B8%8B%E8%BD%BD%E9%A9%B1%E5%8A%A8.png)
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/3b485d8024e9474388baa05de3424e85~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E4%B8%8B%E8%BD%BD%E9%A9%B1%E5%8A%A82.png)
 
 将他们解压后会得到两个shell文件
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/46973e3cfcb6498f98133564e4273b2e~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E9%A9%B1%E5%8A%A8%E8%A7%A3%E5%8E%8B.png)
 
 将他们复制到下载好的aosp源码的根目录
 
@@ -95,7 +95,7 @@ AOSP代码下载是个漫长的过程，需要耐心等待
 1. 先将shell切换到aosp源码根目录
 2. 执行两个解压出来的驱动shell，记得要同意License
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/e753f0f11a4c4ed7bae08f2f3daaef96~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E9%A9%B1%E5%8A%A8%E5%AE%89%E8%A3%85.png)
 
 3. 执行source build/envsetup.sh，这会向shell中写入一些环境变量
 4. 先make clean一下
@@ -107,15 +107,17 @@ AOSP代码下载是个漫长的过程，需要耐心等待
 lunch aosp_walleye-userdebug
 ```
 
-后面跟随的的参数可以在这里找到：<https://source.android.com/setup/build/running?hl=zh-cn#selecting-device-build>![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/6686328101e24a0291ee12093e3874df~tplv-k3u1fbpfcp-zoom-1.image)
+后面跟随的的参数可以在这里找到：<https://source.android.com/setup/build/running?hl=zh-cn#selecting-device-build>
+
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E6%9E%84%E5%BB%BA%E7%9B%AE%E6%A0%87.png)
 
 你也可以在lunch后不加参数，这样会弹出一个菜单提示您选择目标
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/941189e204764e22bf33010b737dce75~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E9%80%89%E6%8B%A9%E7%9B%AE%E6%A0%87.png)
 
 指定完成后会弹出这样一个信息提示
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/2d525adf44b446cd87fba0c6e759c588~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E9%80%89%E6%8B%A9%E7%9B%AE%E6%A0%87%E5%AE%8C%E6%88%90.png)
 
 # 开始编译
 
@@ -152,7 +154,7 @@ fastboot reboot #重启命令
 
 ## MacOS上找不到SDK
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/99828f96b9e146db9c8eef93de19ce8f~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_MacOS%E6%89%BE%E4%B8%8D%E5%88%B0SDK.png)
 
 去这里<https://github.com/phracker/MacOSX-SDKs/releases>下载对应版本的sdk，然后将它放到/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs目录下，然后重新编译
 
@@ -162,7 +164,9 @@ fastboot reboot #重启命令
 
 这个目录下存在哪个版本的sdk，确定后去修改..../aosp/build/soong/cc/config/x86_darwin_host.go文件，在darwinSupportedSdkVersions这个数组中加上你使用的sdk的版本
 
-![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/b622d2da89c94494a01022ec9c400a4b~tplv-k3u1fbpfcp-zoom-1.image)![](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/2ee9f917b2724da79f35bd097169d434~tplv-k3u1fbpfcp-zoom-1.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E6%89%BE%E5%88%B0%E6%96%87%E4%BB%B6.png)
+
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/AOSP%E7%9A%84%E7%BC%96%E8%AF%91%E5%8F%8A%E5%88%B7%E6%9C%BA_%E5%A2%9E%E5%8A%A0%E7%89%88%E6%9C%AC.png)
 
 保存后重新编译，这个方式可能当前编译脚本不支持你所用的sdk，可能会编译报错，所以还是推荐使用第一种方式
 

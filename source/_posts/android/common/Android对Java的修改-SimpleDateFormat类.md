@@ -41,7 +41,7 @@ public static String utc2Local(String utcTime) {
 
 Android对OpenJDK中的`SimpleDateFormat`进行了修改，具体在`subParseNumericZone`方法中：
 
-![](https://p9-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/8b3785ca49d04320b3f6658ad4d859fa~tplv-k3u1fbpfcp-watermark.image)
+![](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E5%AF%B9Java%E7%9A%84%E4%BF%AE%E6%94%B9-SimpleDateFormat%E7%B1%BB.png)
 
 可以看到，OpenJDK原本是不支持带冒号的写法的，而在Android中修改了`subParseNumericZone`方法，使其可以解析带冒号的写法。
 

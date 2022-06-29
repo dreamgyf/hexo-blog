@@ -40,7 +40,7 @@ categories:
 
 共享内存是进程间通信中最简单的方式之一，共享内存允许两个或更多进程访问同一块内存，当一个进程改变了这块地址中的内容的时候，其它进程都会察觉到这个更改，它的原理如下图所示：
 
-![共享内存](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/4cb8748d544c4f78999232eee81544af~tplv-k3u1fbpfcp-watermark.image?)
+![共享内存](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_%E5%85%B1%E4%BA%AB%E5%86%85%E5%AD%98.png)
 
 因为共享内存是访问同一块内存，所以数据不需要进行任何复制，是IPC几种方式中最快，性能最好的方式。但相对应的，共享内存未提供同步机制，需要我们手动控制内存间的互斥操作，较容易发生问题。同时共享内存由于能任意的访问和修改内存中的数据，如果有恶意程序去针对某个程序设计代码，很可能导致隐私泄漏或者程序崩溃，所以安全性较差。
 
@@ -48,7 +48,7 @@ categories:
 
 管道分为命名管道和无名管道，它是以一种特殊的文件作为中间介质，我们称为管道文件，它具有固定的读端和写端，写进程通过写段向管道文件里写入数据，读进程通过读段从读进程中读出数据，构成一条数据传递的流水线，它的原理如下图所示：
 
-![管道](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/82253e92afc34a5580e9839ef46a3f9a~tplv-k3u1fbpfcp-watermark.image?)
+![管道](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_%E7%AE%A1%E9%81%93.png)
 
 管道一次通信需要经历2次数据复制（进程A -> 管道文件，管道文件 -> 进程B）。管道的读写分阻塞和非阻塞，管道创建会分配一个缓冲区，而这个缓冲区是有限的，如果传输的数据大小超过缓冲区上限，或者在阻塞模式下没有安排好数据的读写，会出现阻塞的情况。管道所传送的是无格式字节流，这就要求管道的读出方和写入方必须事先约定好数据的格式。
 
@@ -56,13 +56,13 @@ categories:
 
 消息队列是存放在内核中的消息链表，每个消息队列由消息队列标识符表示。消息队列允许多个进程同时读写消息，发送方与接收方要约定好，消息体的数据类型与大小。消息队列克服了信号承载信息量少、管道只能承载无格式字节流等缺点，消息队列一次通信同样需要经历2次数据复制（进程A -> 消息队列，消息队列 -> 进程B），它的原理如下图所示：
 
-![消息队列](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/c5712f1678b4468ba0f30e8d3f788a96~tplv-k3u1fbpfcp-watermark.image?)
+![消息队列](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_%E6%B6%88%E6%81%AF%E9%98%9F%E5%88%97.png)
 
 ### Socket
 
 `Socket`原本是为了网络设计的，但也可以通过本地回环地址 (`127.0.0.1`) 进行进程间通信，后来在`Socket`的框架上更是发展出一种IPC机制，名叫`UNIX Domain Socket`。`Socket`是一种典型的`C/S`架构，一个`Socket`会拥有两个缓冲区，一读一写，由于发送/接收消息需要将一个`Socket`缓冲区中的内容拷贝至另一个`Socket`缓冲区，所以`Socket`一次通信也是需要经历2次数据复制，它的原理如下图所示：
 
-![Socket](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/8affe516eb524fc987bea572f00e2c15~tplv-k3u1fbpfcp-watermark.image?)
+![Socket](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_Socket.png)
 
 ## Binder
 
@@ -96,7 +96,7 @@ categories:
 
 这样便完成了一次`Binder` IPC通信，它的原理如下图所示：
 
-![Binder](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/5c882d8e2ebd469786474c8897e4fba9~tplv-k3u1fbpfcp-watermark.image?)
+![Binder](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_Binder%E9%80%9A%E4%BF%A1%E5%8E%9F%E7%90%86.png)
 
 可以看到，通过`mmap`，`Binder`通信时，只需要经历一次数据复制，性能要优于管道/消息队列/socket等方式，在安全性，易用性方面又优于共享内存。鉴于上述原因，`Android`选择了这种折中的IPC方式，来满足系统对稳定性、传输性能和安全性方面的要求
 
@@ -104,15 +104,15 @@ categories:
 
 `Binder`也是一种`C/S`架构，分为`BpBinder`（客户端）和`BBinder`（服务端），他们都派生自`IBinder`。其中`BpBinder`中的p表示proxy，即代理。`BpBinder`通过`transact`来发送事务请求，`BBinder`通过`onTransact`来接收相应的事务
 
-![Ibinder](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/e346a6cdb89f4ad5abf61e0a1e0a8046~tplv-k3u1fbpfcp-watermark.image?)
+![Ibinder](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_Binder%E6%9E%B6%E6%9E%84.png)
 
 Binder一次通信的时序图如下：
 
-![Binder通信](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/d75fba62f67e46bca5ef8c3c73882625~tplv-k3u1fbpfcp-watermark.image?)
+![Binder通信](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_Binder%E9%80%9A%E4%BF%A1%E6%97%B6%E5%BA%8F.png)
 
 Binder采用分层架构设计
 
-![Binder分层架构](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/0664b95fe84f40f19021cb9d4ce0ea82~tplv-k3u1fbpfcp-watermark.image?)
+![Binder分层架构](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E6%A6%82%E8%BF%B0_Binder%E5%88%86%E5%B1%82%E6%9E%B6%E6%9E%84.png)
 
 # 总结
 

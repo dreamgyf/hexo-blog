@@ -13,7 +13,7 @@ categories: Android
 
 [https://github.com/dreamgyf/MarqueeTextView](https://github.com/dreamgyf/MarqueeTextView)
 
-![MarqueeTextView](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/845e451450724f1095cbe753bc7beca0~tplv-k3u1fbpfcp-zoom-1.image)
+![MarqueeTextView](https://camo.githubusercontent.com/f78ec92d9270fe6a72f182090567334a5d9ecb5221f471a34cbd83905be65c6a/68747470733a2f2f647265616d6779662d636f64696e672e6f73732d636e2d7368616e676861692e616c6979756e63732e636f6d2f4d61727175656554657874566965772f4d61727175656554657874566965772e676966)
 
 # 思路
 

@@ -598,7 +598,7 @@ struct binder_transaction_data {
 
 可以看到，真正需要拷贝的数据的地址是保存在`data`域中的，可能文字描述的`data`结构不是特别清晰，可以结合下图理解：
 
-![data结构](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/c2bc3f01ad2e41f1971037ea3afece9c~tplv-k3u1fbpfcp-watermark.image?)
+![data结构](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E9%A9%B1%E5%8A%A8%EF%BC%88%E4%B8%AD%EF%BC%89_binder_transaction_data.png)
 
 ##### transaction_flags
 
