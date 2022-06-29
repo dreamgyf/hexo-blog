@@ -1,7 +1,9 @@
 ---
 title: Android源码分析 - init进程
 date: 2022-01-04 17:19:00
-tags: Android源码
+tags: 
+- Android源码
+- init进程
 categories: 
 - [Android, 源码分析]
 ---

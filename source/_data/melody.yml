@@ -130,9 +130,9 @@ cdn:
 # ---------------
 avatar: /images/avatar.jpeg
 
-top_img: /images/cover.jpg
+top_img: /images/background.jpeg
 
-top_img_height: 60 # best range: 60 - 100
+top_img_height: 70 # best range: 60 - 100
 
 post_meta:
   date_type: created # created or updated

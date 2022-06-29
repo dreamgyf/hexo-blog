@@ -1,7 +1,9 @@
 ---
 title: Android源码分析 - Zygote进程
 date: 2022-01-10 17:30:00
-tags: Android源码
+tags: 
+- Android源码
+- Zygote
 categories: 
 - [Android, 源码分析]
 ---
