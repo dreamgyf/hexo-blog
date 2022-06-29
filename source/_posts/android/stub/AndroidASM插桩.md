@@ -38,7 +38,7 @@ ASM插桩在网上其实已经有很多资料了，我之所以再写这篇文�
 
 我们知道，`Java`程序是运行在`JVM`（`Java`虚拟机）上的，`Java`源代码首先会由编译器（`Java Compiler`）编译成包含了`Bytecode`（字节码）的`.class`文件，程序执行时，由类加载器(`class loader`)将该类的字节码加载到`JVM`中，`JVM`会解释执行相应的`Bytecode`。如下图所示：
 
-![Java编译执行过程](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/fe8c7df420834af09d07cf5c1bde52b8~tplv-k3u1fbpfcp-zoom-1.image)
+![Java编译执行过程](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E5%AD%97%E8%8A%82%E7%A0%81.png)
 
 为什么不直接彻底编译成机器码，而需要字节码这个中间产物呢？`Java`是一门跨平台的语言，为了实现一份源码，处处运行的效果，每个平台都有对应不同的`JVM`，它会将源码对应的指令翻译成对应平台能够理解的机器指令。那为什么不从源码直接解释执行呢，我个人认为这是因为直接从源码开始的编译，速度非常慢，出于性能的考虑，先将源码做一些预处理，处理为字节码，来减轻运行前的编译的性能开销。
 
@@ -46,13 +46,13 @@ ASM插桩在网上其实已经有很多资料了，我之所以再写这篇文�
 
 # Android打包过程
 
-![Android打包过程](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/84d4f89a8452465397c9d0392a1b5b09~tplv-k3u1fbpfcp-zoom-1.image)
+![Android打包过程](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E6%89%93%E5%8C%85%E8%BF%87%E7%A8%8B.png)
 
 # Android插桩过程
 
-![Android插桩点](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/ef7c887b99f34fe186cba5bace804861~tplv-k3u1fbpfcp-zoom-1.image)
+![Android插桩点](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E6%8F%92%E6%A1%A9%E8%BF%87%E7%A8%8B.png)
 
-![Android插桩点](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/fc778a12d5674eb29198bc555cd096fa~tplv-k3u1fbpfcp-zoom-1.image)
+![Android插桩点](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E6%8F%92%E6%A1%A9%E8%BF%87%E7%A8%8B2.png)
 
 # 实战
 
@@ -156,7 +156,7 @@ com/xxx/xxx/BaseActivity
 
 根据[官网](http://tools.android.com/tech-docs/new-build-system/transform-api)介绍，`Transform Api`允许第三方 `Plugin` 在打包 `dex` 文件之前的编译过程中操作`.class` 文件，下图是`Transform Api`的工作流程
 
-![Transform Api工作流程](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/45696e712b674432908fe4beb67f1d12~tplv-k3u1fbpfcp-zoom-1.image)
+![Transform Api工作流程](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_Transform%E8%BF%87%E7%A8%8B.png)
 
 可以看到，一次`App`的编译打包可能会经历多次`Transform`，`Transform`将输入进行处理，然后写入到指定的目录下作为下一个 `Transform` 的输入源。
 
@@ -176,7 +176,7 @@ void apply(Project project) {
 ```
 3. 最后，需要实现`Transform`类中的抽象方法
 
-![Transform抽象方法](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/402b2ab5ce5e41e28d17ca9def7f0e3e~tplv-k3u1fbpfcp-zoom-1.image)
+![Transform抽象方法](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_Transform%E7%B1%BB.png)
 
 - `getName` 这个方法是指定这个`Transform`的名称
 
@@ -189,17 +189,17 @@ String getName() {
 
 - `getInputTypes` 这个方法是指定输入类型
 
-![Transform输入类型](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/06d6c997bef74f70ac275cb8f032c319~tplv-k3u1fbpfcp-zoom-1.image)
+![Transform输入类型](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_getInputTypes.png)
 
-![Transform输入类型](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/9c4dbd4ac1044950a33041104bcc8a92~tplv-k3u1fbpfcp-zoom-1.image)
+![Transform输入类型](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_getInputTypes2.png)
 
 这里，我们选用`TransformManager.CONTENT_CLASS`就可以了
 
 - `getScopes` 这个方法是指定插桩的作用域
 
-![Transform作用域](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/e27f4fd6b7314beeb9d2d005a4bb98a5~tplv-k3u1fbpfcp-zoom-1.image)
+![Transform作用域](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_getScopes.png)
 
-![Transform作用域](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/fa9c48dfb3234dbcacaa1b376751ff70~tplv-k3u1fbpfcp-zoom-1.image)
+![Transform作用域](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_getScopes2.png)
 
 这里我们选择`TransformManager.SCOPE_FULL_PROJECT`，代表插桩范围包括此工程和它依赖的所有包
 
@@ -211,7 +211,7 @@ String getName() {
 
 `transform()`方法的参数 `TransformInvocation` 是一个接口，提供了一些关于输入输出的一些基本信息。下图是`transform`中我们需要走的流程
 
-![Transform流程](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/f4584ea9c660464d9888275eed888c94~tplv-k3u1fbpfcp-zoom-1.image)
+![Transform流程](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_transform%E6%B5%81%E7%A8%8B.png)
 
 这里以`directoryInputs`举例，`directoryInputs`就是本地源码编译后产生的`class`文件
 
@@ -257,7 +257,7 @@ private void handleDirectory(DirectoryInput input, TransformOutputProvider outpu
 
 可以用以下流程图大概描述一下一个`class`文件的修改过程
 
-![class文件修改流程](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/21520bd033574da6909139c80a480406~tplv-k3u1fbpfcp-watermark.image?)
+![class文件修改流程](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_class%E4%BF%AE%E6%94%B9%E8%BF%87%E7%A8%8B.png)
 
 ## 自定义ClassVisitor
 
@@ -265,33 +265,33 @@ private void handleDirectory(DirectoryInput input, TransformOutputProvider outpu
 
 ### 读取配置
 
-![读取配置](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/5fa81ba499134d27821ed2389cf218af~tplv-k3u1fbpfcp-zoom-1.image)
+![读取配置](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E8%AF%BB%E5%8F%96%E9%85%8D%E7%BD%AE.png)
 
 ### 访问类
 
-![访问类方法](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/ba63646137f94b74865528d136198060~tplv-k3u1fbpfcp-zoom-1.image)
+![访问类方法](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E8%AE%BF%E9%97%AE%E7%B1%BB.png)
 
 通过这个方法我们可以获得这个类的访问控制，全限定类名，父类名，实现的接口名等信息
 
 这里，我们通过全限定类名和读取出的配置做比对，进一步验证是否需要对此类进行插桩
 
-![验证类是否可插桩](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/ce24b21370bd4144a6b7b0047860e4a5~tplv-k3u1fbpfcp-zoom-1.image)
+![验证类是否可插桩](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E7%AD%9B%E9%80%89%E7%B1%BB.png)
 
-![验证类是否可插桩](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/4d8e3f0a480a4ecd85dceb5bc1f8d135~tplv-k3u1fbpfcp-zoom-1.image)
+![验证类是否可插桩](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E7%AD%9B%E9%80%89%E7%B1%BB2.png)
 
 ### 访问类内方法
 
-![访问类内方法](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/f4109c47d30b404aa61e14bf34358d64~tplv-k3u1fbpfcp-zoom-1.image)
+![访问类内方法](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E8%AE%BF%E9%97%AE%E7%B1%BB%E5%86%85%E6%96%B9%E6%B3%95.png)
 
 通过这个方法我们可以获得这个类的所有方法的名称和描述符，我们通过它们来判断该方法是否需要插桩
 
-![判断方法是否需要插桩](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/1457e9ef5cea4206a59ad71850f0e0b0~tplv-k3u1fbpfcp-zoom-1.image)
+![判断方法是否需要插桩](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E7%AD%9B%E9%80%89%E6%96%B9%E6%B3%95.png)
 
 如果有需要插桩的方法，就将`mNeedStubClass`标志位置为true，这个标识是为了我们后续判断是否要在该类中插入成员变量，然后使用我们自定义的`MethodVisitor`替换原始的`MethodVisitor`。
 
 ### 插入成员变量
 
-![插入成员变量](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/f55e82fbd39a45e98742bdc8aa76c8d8~tplv-k3u1fbpfcp-zoom-1.image)
+![插入成员变量](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%20ASM%E6%8F%92%E6%A1%A9_%E6%8F%92%E5%85%A5%E6%88%90%E5%91%98%E5%8F%98%E9%87%8F.png)
 
 在最后，如果有需要插桩的方法，我们需要将`private long _$_timeRecorder`这个成员变量插入到类中去
 
