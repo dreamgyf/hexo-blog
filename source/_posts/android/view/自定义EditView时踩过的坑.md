@@ -6,8 +6,10 @@ categories: Android
 ---
 
 # 简介
+
 这次的需求是一个单词拼写的输入框，要求每个字母分割开来输入，每个字母下面有一个下划线，就类似于验证码输入或者支付密码输入的效果
-![效果图](/images/spell_edit_text.png "效果图")
+
+![效果图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/%E8%87%AA%E5%AE%9A%E4%B9%89EditView%E6%97%B6%E8%B8%A9%E8%BF%87%E7%9A%84%E5%9D%91_%E6%95%88%E6%9E%9C%E5%9B%BE.png "效果图")
 
 最终成品是一个自定义View，实现参考了[VercodeEditText](https://github.com/JingYeoh/VercodeEditText)
 
