@@ -16,13 +16,13 @@ categories:
 
 这个`Demo`实现了：
 
-- `Compose`替代传统布局z
+- `Compose`替代传统布局
 
-![Compose替代传统布局](https://p6-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/53cc2274f87240558909120b06ac4255~tplv-k3u1fbpfcp-watermark.image?)
+![Compose替代传统布局](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Jetpack%20Compose%E5%85%A5%E9%97%A8_%E6%9B%BF%E4%BB%A3%E4%BC%A0%E7%BB%9F%E5%B8%83%E5%B1%80.png)
 
 - 网格列表效果，类似于传统布局中的`RecyclerView`配合`GridLayoutManager`
 
-![网格列表](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/c8eb90d2527848958fbe5ae814e5bbfe~tplv-k3u1fbpfcp-watermark.image?)
+![网格列表](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Jetpack%20Compose%E5%85%A5%E9%97%A8_%E7%BD%91%E6%A0%BC%E5%88%97%E8%A1%A8%E6%95%88%E6%9E%9C.png)
 
 - 在传统View中使用Compose
 
@@ -429,6 +429,6 @@ fun Preview() {
 }
 ```
 
-![效果图](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/4a3f61a420a741e1b04f854a768cc501~tplv-k3u1fbpfcp-zoom-1.image)
+![效果图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Jetpack%20Compose%E5%85%A5%E9%97%A8_%E8%87%AA%E5%AE%9A%E4%B9%89Layout.png)
 
 其实`Compose`中的自定义UI的思路和传统自定义`View`是一样的，只不过需要熟悉`Compose`中的各种`Api`才能灵活运用它

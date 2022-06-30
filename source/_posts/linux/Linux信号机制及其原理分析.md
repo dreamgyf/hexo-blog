@@ -319,7 +319,7 @@ int sigpending(sigset_t *set);
 
 下图为信号相关的一些结构
 
-![task_struct中的信号结构](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/d9c71b1d458e4fa08cdf4ae0f4c0c860~tplv-k3u1fbpfcp-watermark.image?)
+![task_struct中的信号结构](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Linux%E4%BF%A1%E5%8F%B7%E6%9C%BA%E5%88%B6%E5%8F%8A%E5%85%B6%E5%8E%9F%E7%90%86%E5%88%86%E6%9E%90_%E7%9B%B8%E5%85%B3%E7%BB%93%E6%9E%84.png)
 
 ## 信号的发送
 
@@ -596,7 +596,7 @@ ret:
 
 之前我们介绍了怎么自定义信号处理行为，如何设置信号屏蔽字，实际上都能在进程的`task_struct`中体现出来，信号处理行为保存在其中的`sighand`域中，而信号屏蔽字保存在其中的`blocked`域中
 
-![task_struct](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/b1b836e5a67d423e8c7348d793e602cd~tplv-k3u1fbpfcp-watermark.image?)
+![task_struct](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Linux%E4%BF%A1%E5%8F%B7%E6%9C%BA%E5%88%B6%E5%8F%8A%E5%85%B6%E5%8E%9F%E7%90%86%E5%88%86%E6%9E%90_%E4%BF%A1%E5%8F%B7%E5%AF%B9%E5%BA%94%E7%9A%84%E5%9F%9F%E6%88%90%E5%91%98%E5%8F%98%E9%87%8F.png)
 
 ## 信号的响应
 
@@ -811,10 +811,10 @@ out:
 
 用户自定义信号处理函数实际上是在用户空间执行的，目的是为了防止用户利用内核空间的`ring 0`特权等级做一些意想不到的事，处理过程如下两图所示：
 
-![信号处理过程](https://p3-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/4a61956942554b31868d5e6bff507d30~tplv-k3u1fbpfcp-watermark.image?)
+![信号处理过程](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Linux%E4%BF%A1%E5%8F%B7%E6%9C%BA%E5%88%B6%E5%8F%8A%E5%85%B6%E5%8E%9F%E7%90%86%E5%88%86%E6%9E%90_%E4%BF%A1%E5%8F%B7%E5%A4%84%E7%90%86%E8%BF%87%E7%A8%8B.png)
 
 
-![信号处理过程](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/d7e7957245ed47a9923f9aa801e19c12~tplv-k3u1fbpfcp-watermark.image?)
+![信号处理过程](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Linux%E4%BF%A1%E5%8F%B7%E6%9C%BA%E5%88%B6%E5%8F%8A%E5%85%B6%E5%8E%9F%E7%90%86%E5%88%86%E6%9E%90_%E4%BF%A1%E5%8F%B7%E5%A4%84%E7%90%86%E8%BF%87%E7%A8%8B2.png)
 
 整个过程如图中所见，进程由于系统调用或中断进入内核空间，在内核空间完成工作后返回用户空间的前夕，检查信号队列，如果检查有信号并且有自定义的信号处理函数，返回到用户空间执行信号处理函数，处理完后再返回内核空间，最后再回到用户空间之前代码执行到的地方继续运行
 

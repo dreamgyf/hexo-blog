@@ -992,11 +992,11 @@ status_t IPCThreadState::talkWithDriver(bool doReceive)
 
 - `TF_ONE_WAY`
 
-![binder_oneway.png](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/df0ca935bc2646c7a5edc1ae16f284dc~tplv-k3u1fbpfcp-watermark.image?)
+![binder_oneway](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Framework%E5%B1%82%E7%9A%84Binder%EF%BC%88%E5%AE%A2%E6%88%B7%E7%AB%AF%E7%AF%87%EF%BC%89_oneway.png)
 
 - `非 TF_ONE_WAY`
 
-![binder_non_oneway.png](https://p1-juejin.byteimg.com/tos-cn-i-k3u1fbpfcp/5768ee7438c0419099d8513db644c8fe~tplv-k3u1fbpfcp-watermark.image?)
+![binder_non_oneway](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Framework%E5%B1%82%E7%9A%84Binder%EF%BC%88%E5%AE%A2%E6%88%B7%E7%AB%AF%E7%AF%87%EF%BC%89_non_oneway.png)
 
 我们先对照着看`TF_ONE_WAY`的情况
 
