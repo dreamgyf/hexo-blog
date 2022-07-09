@@ -577,17 +577,17 @@ struct binder_transaction_data {
     pid_t		sender_pid;
     //发起请求的进程uid
     uid_t		sender_euid;
-    //真正要传输的flat_binder_object数据的大小
+    //真正要传输的数据的大小
     binder_size_t	data_size;
-    //偏移数组大小，这个偏移数组是用来描述数据区中，每一个IPC对象（flat_binder_object）的位置的
+    //偏移数组大小，这个偏移数组是用来描述数据区中，每一个binder对象的位置的
     binder_size_t	offsets_size;
 
     union {
         struct {
             //数据区的首地址
             binder_uintptr_t	buffer;
-            //偏移数组的首地址，这个偏移数组是用来描述数据区中，每一个IPC对象（flat_binder_object）的位置的
-            //数组的每一项为一个binder_size_t，这个值对应着每一个IPC对象（flat_binder_object）在buffer中所占的大小
+            //偏移数组的首地址，这个偏移数组是用来描述数据区中，每一个binder对象的位置的
+            //数组的每一项为一个binder_size_t，这个值对应着每一个binder对象相对buffer首地址的偏移
             binder_uintptr_t	offsets;
         } ptr;
         //数据较小的时候可以直接装在这个数组里
@@ -599,6 +599,22 @@ struct binder_transaction_data {
 可以看到，真正需要拷贝的数据的地址是保存在`data`域中的，可能文字描述的`data`结构不是特别清晰，可以结合下图理解：
 
 ![data结构](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E9%A9%B1%E5%8A%A8%EF%BC%88%E4%B8%AD%EF%BC%89_binder_transaction_data.png)
+
+这里我用一个例子来解释一下`binder_transaction_data`传输的数据是什么样子的
+
+小伙伴们应该都了解`Parcel`吧，它是一个存放读取数据的容器，我们`binder_transaction_data`中实际传输的数据就是通过它组合而成的，它可以传输基本数据类型，`Parcelable`类型和`binder`类型
+
+其中基本数据类型就不用说了，每种基本类型所占用的大小是固定的，`Parcelable`类型实际上也是传输基本数据类型，它是通过实现`Parcelable`接口将一个复杂对象中的成员序列化成了一个个基本数据类型传输，而`binder`类型的传输有点特别，它会将这个`binder`对象 "压扁" 成一个`flat_binder_object`结构体传输
+
+假设我们有一个客户端`client`，一个服务端`server`，`client`想要向`binder`驱动发起一个事物，调用`server`的某个方法，我们该怎么构建`binder_transaction_data`的数据区呢？
+
+一般来说，我们需要先写一个`token`，这个`token`是为了进行校验的，两端需要保持一致。接着我们需要按顺序依次写入参数，假设我们想要调用`server`的`callMe(int, Parcelable, IBinder)`函数，那我们就需要先写入一个`int`，再写入一个`Parcelable`，最后再将`IBinder` "压扁" 成一个`flat_binder_object`写入。
+
+此时数据布局如下图所示：
+
+![data结构](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Binder%E9%A9%B1%E5%8A%A8%EF%BC%88%E4%B8%AD%EF%BC%89_binder_transaction_data2.png)
+
+从图中我们可以看出来，`offsets`指示出了`buffer`中传输的`binder`对象的位置，有几个`binder`对象，就会有几个`offset`与之对应
 
 ##### transaction_flags
 
@@ -1290,7 +1306,7 @@ static int binder_update_page_range(struct binder_alloc *alloc, int allocate,
 
 ###### flat_binder_object结构体
 
-在看代码之前，我们先了解一个重要的数据结构`flat_binder_object`
+这里就是我们之前提到的，`binder`对象在传输过程中会被 "压扁" 的结构
 
 ```c
 struct flat_binder_object {
@@ -1312,8 +1328,6 @@ struct flat_binder_object {
     binder_uintptr_t	cookie;
 };
 ```
-
-这个结构体在`framework层`和`驱动层`均会被使用，跨进程通信时，`framework层`会将需要传输的指令和数据压扁成`flat_binder_object`，在`binder驱动`中传输
 
 ###### binder_translate_binder
 
