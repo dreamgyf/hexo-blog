@@ -73,6 +73,14 @@ if (mRecyclerView != null && mRecyclerView.getChildCount() > 0) {
 - 使用`notifyDataSetChanged()`
 - 使用`notifyItem`，但是在`onBindViewHolder`中设置回调时不要使用position参数，而是使用`holder.getAdapterPosition()`替代（注意这个方法在`ViewHolder`没有和`RecyclerView`绑定时会返回-1 `NO_POSITION`）
 
+## ItemDecoration
+
+1. `StaggeredGridLayoutManager`下`ItemDecoration`的`offset`计算错误
+
+主要是因为`RecyclerView`动态更新数据时，会执行多次`measure`，但只会在第一次`measure`的时候调用`ItemDecoration.getItemOffsets`（因为`LP`里的`mInsetsDirty`变量），此时获得的`spanIndex`是一个错误值
+
+这个问题的具体分析可以看[这篇文章](https://blog.kyleduo.com/2017/07/27/recyclerview-wrong-decoration-inset/)，暂时没有什么好的解决方案，不建议大家使用反射，毕竟你不知道`Android`会不会更改这个变量
+
 ---
 
 # Dialog

@@ -1,5 +1,5 @@
 ---
-title: Android源码分析 - Activity启动流程
+title: Android源码分析 - Activity启动流程（上）
 date: 2022-08-01 15:19:35
 tags: 
 - Android源码
@@ -18,6 +18,16 @@ categories:
 作为一名`Android`开发，我们最熟悉并且最常打交道的当然非四大组件中的`Activity`莫属，这次我们就来讲讲一个`Activity`是怎样启动起来的
 
 本来本篇想要讲`ActivityManagerService`的，但`AMS`中的内容过多过于繁杂，不如用这种以线及面的方式，通过`Activity`的启动流程这一条线，去了解`ActivityThread`，`AMS`等是怎么工作的
+
+# Android窗口结构关系
+
+在开始正式深入代码之前，我们需要先理一下`Android`的窗口结构关系，以免后面看到源码里各种`parent`、`child`头晕，我画了一张树状关系图来描述它
+
+![Android窗口结构关系](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Activity%E5%90%AF%E5%8A%A8%E6%B5%81%E7%A8%8B%EF%BC%88%E4%B8%8A%EF%BC%89-Android%E7%AA%97%E5%8F%A3%E7%BB%93%E6%9E%84%E5%85%B3%E7%B3%BB.png)
+
+上图中的所有类都是`WindowContainer`的子类，`WindowContainer`是一个窗口容器，它的`child`也是`WindowContainer`，它是用来管理窗口子容器的
+
+可以先不用纠结理解这张图中的关系，顺着源码往下看，碰到不理解的地方回头看一下就可以了
 
 # startActivity
 
@@ -147,6 +157,8 @@ private int startActivityAsUser(IApplicationThread caller, String callingPackage
 这个函数大部分内容都是检查，最重要的是最后一段使用`ActivityStarter`启动`Activity`，首先通过`ActivityStartController`的`obtainStarter`方法获取一个`ActivityStarter`实例，然后调用各种set方法设置参数，最后执行`execute`方法执行
 
 # ActivityStarter
+
+这个类从名字就能看出来，就是一个专门处理`Activity`启动的类
 
 ```java
 int execute() {
@@ -700,7 +712,7 @@ int startActivityInner(final ActivityRecord r, ActivityRecord sourceRecord,
     if (mDoResume) {
         final ActivityRecord topTaskActivity =
                 mStartActivity.getTask().topRunningActivityLocked();
-        //启动的Activity不可获得焦点，无法启动、恢复它
+        //启动的Activity不可获得焦点，无法恢复它
         if (!mTargetStack.isTopActivityFocusable()
                 || (topTaskActivity != null && topTaskActivity.isTaskOverlay()
                 && mStartActivity != topTaskActivity)) {
@@ -727,7 +739,7 @@ int startActivityInner(final ActivityRecord r, ActivityRecord sourceRecord,
                     && !mRootWindowContainer.isTopDisplayFocusedStack(mTargetStack)) {
                 mTargetStack.moveToFront("startActivityInner");
             }
-            //重点：启动、恢复栈顶Activities
+            //重点：恢复栈顶Activities
             mRootWindowContainer.resumeFocusedStacksTopActivities(
                     mTargetStack, mStartActivity, mOptions);
         }
@@ -746,7 +758,9 @@ int startActivityInner(final ActivityRecord r, ActivityRecord sourceRecord,
 
 这里主要做了一些`Task`和栈的操作，是否可以复用栈，是否需要新栈，处理栈顶复用等相关操作。我们需要注意一下这里关于`Task`的操作，不管是新建`Task`（`newTask`）还是复用`Task`（`mAddingToTask`），都会调用到`addOrReparentStartingActivity`方法将启动`ActivityRecord`添加到`targetTask`容器顶部（`newTask`的情况下会调用`setNewTask`方法先复用或创建`Task`，然后再用这个`Task`调用`addOrReparentStartingActivity`方法），之后调用`mTargetStack.startActivityLocked`方法将`Task`移到`mTargetStack`容器顶部，此时调用`mTargetStack.topRunningActivity`便会得到我们将要启动的这个`ActivityRecord`
 
-最后判断目标`Activity`是否可获得焦点，当可获得焦点的时候，调用`RootWindowContainer.resumeFocusedStacksTopActivities`方法启动、恢复`Activity`
+最后判断目标`Activity`是否可获得焦点，当可获得焦点的时候，调用`RootWindowContainer.resumeFocusedStacksTopActivities`方法恢复`Activity`
+
+要注意，从这个方法开始的以后的方法不再只是针对`Activity`启动的方法，它们有可能被多方调用，所以其中的一些步骤case我们是不会经历的，可以忽略掉这部分
 
 # RootWindowContainer
 
@@ -824,7 +838,11 @@ boolean resumeFocusedStacksTopActivities(
 
 - 对每个显示设备，如果存在焦点栈，则使用其执行Resume，否则启动`Launcher`
 
-在正常情况下，我们会走进`resumeTopActivityUncheckedLocked`这个方法
+在正常情况下，我们会走进`ActivityStack.resumeTopActivityUncheckedLocked`这个方法
+
+# ActivityStack
+
+`Activity`栈，用于管理栈中的`Activity`
 
 ```java
 boolean resumeTopActivityUncheckedLocked(ActivityRecord prev, ActivityOptions options) {
@@ -874,6 +892,7 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
     // Find the next top-most activity to resume in this stack that is not finishing and is
     // focusable. If it is not focusable, we will fall into the case below to resume the
     // top activity in the next focusable task.
+    //在之前我们已经把要启动的ActivityRecord加到了栈顶
     ActivityRecord next = topRunningActivity(true /* focusableOnly */);
 
     final boolean hasRunningActivity = next != null;
@@ -889,13 +908,11 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
     final TaskDisplayArea taskDisplayArea = getDisplayArea();
 
     // If the top activity is the resumed one, nothing to do.
+    //如果需要Resume的已在顶部且状态为Resume，不需要做任何事
+    //启动Activity不会碰到这种case
     if (mResumedActivity == next && next.isState(RESUMED)
             && taskDisplayArea.allResumedActivitiesComplete()) {
-        // Make sure we have executed any pending transitions, since there
-        // should be nothing left to do at this point.
-        executeAppTransition(options);
-        if (DEBUG_STATES) Slog.d(TAG_STATES,
-                "resumeTopActivityLocked: Top activity resumed " + next);
+        ...
         return false;
     }
 
@@ -904,52 +921,19 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
     }
 
     // If we are currently pausing an activity, then don't do anything until that is done.
+    //如果有正在Pause的Activity，在它Pause完成前不要做任何事
     final boolean allPausedComplete = mRootWindowContainer.allPausedActivitiesComplete();
     if (!allPausedComplete) {
-        if (DEBUG_SWITCH || DEBUG_PAUSE || DEBUG_STATES) {
-            Slog.v(TAG_PAUSE, "resumeTopActivityLocked: Skip resume: some activity pausing.");
-        }
         return false;
     }
 
-    // If we are sleeping, and there is no resumed activity, and the top activity is paused,
-    // well that is the state we want.
-    if (shouldSleepOrShutDownActivities()
-            && mLastPausedActivity == next
-            && mRootWindowContainer.allPausedActivitiesComplete()) {
-        // If the current top activity may be able to occlude keyguard but the occluded state
-        // has not been set, update visibility and check again if we should continue to resume.
-        boolean nothingToResume = true;
-        if (!mAtmService.mShuttingDown) {
-            final boolean canShowWhenLocked = !mTopActivityOccludesKeyguard
-                    && next.canShowWhenLocked();
-            final boolean mayDismissKeyguard = mTopDismissingKeyguardActivity != next
-                    && next.containsDismissKeyguardWindow();
-
-            if (canShowWhenLocked || mayDismissKeyguard) {
-                ensureActivitiesVisible(null /* starting */, 0 /* configChanges */,
-                        !PRESERVE_WINDOWS);
-                nothingToResume = shouldSleepActivities();
-            } else if (next.currentLaunchCanTurnScreenOn() && next.canTurnScreenOn()) {
-                nothingToResume = false;
-            }
-        }
-        if (nothingToResume) {
-            // Make sure we have executed any pending transitions, since there
-            // should be nothing left to do at this point.
-            executeAppTransition(options);
-            if (DEBUG_STATES) Slog.d(TAG_STATES,
-                    "resumeTopActivityLocked: Going to sleep and all paused");
-            return false;
-        }
-    }
+    ...
 
     // Make sure that the user who owns this activity is started.  If not,
     // we will just leave it as is because someone should be bringing
     // another user's activities to the top of the stack.
+    //确保拥有此Activity的用户已启动
     if (!mAtmService.mAmInternal.hasStartedUserState(next.mUserId)) {
-        Slog.w(TAG, "Skipping resume of top activity " + next
-                + ": user " + next.mUserId + " is stopped");
         return false;
     }
 
@@ -958,61 +942,51 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
     mStackSupervisor.mStoppingActivities.remove(next);
     next.setSleeping(false);
 
-    if (DEBUG_SWITCH) Slog.v(TAG_SWITCH, "Resuming " + next);
-
-    // If we are currently pausing an activity, then don't do anything until that is done.
+    //这里似乎重复检查了，我去查看了一下master分支的代码，已经没有这一段了
     if (!mRootWindowContainer.allPausedActivitiesComplete()) {
-        if (DEBUG_SWITCH || DEBUG_PAUSE || DEBUG_STATES) Slog.v(TAG_PAUSE,
-                "resumeTopActivityLocked: Skip resume: some activity pausing.");
-
         return false;
     }
 
+    //设置启动Activity UID，获取WakeLock，保证在显示Activity的过程中，系统不会进行休眠状态
     mStackSupervisor.setLaunchSource(next.info.applicationInfo.uid);
 
     ActivityRecord lastResumed = null;
+    //上一个具有焦点的ActivityStack（目前仍是屏幕上正在显示的那个Activity的栈）
     final ActivityStack lastFocusedStack = taskDisplayArea.getLastFocusedStack();
     if (lastFocusedStack != null && lastFocusedStack != this) {
-        // So, why aren't we using prev here??? See the param comment on the method. prev doesn't
-        // represent the last resumed activity. However, the last focus stack does if it isn't null.
         lastResumed = lastFocusedStack.mResumedActivity;
-        if (userLeaving && inMultiWindowMode() && lastFocusedStack.shouldBeVisible(next)) {
-            // The user isn't leaving if this stack is the multi-window mode and the last
-            // focused stack should still be visible.
-            if(DEBUG_USER_LEAVING) Slog.i(TAG_USER_LEAVING, "Overriding userLeaving to false"
-                    + " next=" + next + " lastResumed=" + lastResumed);
-            userLeaving = false;
-        }
+        ...
     }
 
+    //Pause掉其他ActivityStack中的栈顶状态为Resume的Activity
     boolean pausing = taskDisplayArea.pauseBackStacks(userLeaving, next);
+    //Pause掉当前ActivityStack中的栈顶状态为Resume的Activity
     if (mResumedActivity != null) {
-        if (DEBUG_STATES) Slog.d(TAG_STATES,
-                "resumeTopActivityLocked: Pausing " + mResumedActivity);
         pausing |= startPausingLocked(userLeaving, false /* uiSleeping */, next);
     }
-    if (pausing) {
-        if (DEBUG_SWITCH || DEBUG_STATES) Slog.v(TAG_STATES,
-                "resumeTopActivityLocked: Skip resume: need to start pausing");
+    if (pausing) { //有Activity执行了Pause
         // At this point we want to put the upcoming activity's process
         // at the top of the LRU list, since we know we will be needing it
         // very soon and it would be a waste to let it get killed if it
         // happens to be sitting towards the end.
         if (next.attachedToProcess()) {
+            //将启动的Activity进程信息移至lru列表的头部
+            //因为很快就会使用它启动Activity
             next.app.updateProcessInfo(false /* updateServiceConnectionActivities */,
                     true /* activityChange */, false /* updateOomAdj */,
                     false /* addPendingTopUid */);
-        } else if (!next.isProcessRunning()) {
+        } else if (!next.isProcessRunning()) { //App进程未启动
             // Since the start-process is asynchronous, if we already know the process of next
             // activity isn't running, we can start the process earlier to save the time to wait
             // for the current activity to be paused.
             final boolean isTop = this == taskDisplayArea.getFocusedStack();
+            //启动App进程
             mAtmService.startProcessAsync(next, false /* knownToBeDead */, isTop,
                     isTop ? "pre-top-activity" : "pre-activity");
         }
-        if (lastResumed != null) {
-            lastResumed.setWillCloseOrEnterPip(true);
-        }
+        ...
+        //这里会先结束掉启动Activity的流程，等待onPause生命周期走完后
+        //再重新调用这个方法执行下一步操作，避免Activity生命周期紊乱
         return true;
     } else if (mResumedActivity == next && next.isState(RESUMED)
             && taskDisplayArea.allResumedActivitiesComplete()) {
@@ -1021,185 +995,45 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
         // So, nothing else to-do except:
         // Make sure we have executed any pending transitions, since there
         // should be nothing left to do at this point.
+        //不需要等待其他的Activity onPause完成
+        //执行完切换效果后就没有什么其他需要做的了
         executeAppTransition(options);
-        if (DEBUG_STATES) Slog.d(TAG_STATES,
-                "resumeTopActivityLocked: Top activity resumed (dontWaitForPause) " + next);
         return true;
     }
 
-    // If the most recent activity was noHistory but was only stopped rather
-    // than stopped+finished because the device went to sleep, we need to make
-    // sure to finish it as we're making a new activity topmost.
-    if (shouldSleepActivities() && mLastNoHistoryActivity != null &&
-            !mLastNoHistoryActivity.finishing) {
-        if (DEBUG_STATES) Slog.d(TAG_STATES,
-                "no-history finish of " + mLastNoHistoryActivity + " on new resume");
-        mLastNoHistoryActivity.finishIfPossible("resume-no-history", false /* oomAdj */);
-        mLastNoHistoryActivity = null;
-    }
+    ...
 
+    //启动Activity流程不会进入这个case
     if (prev != null && prev != next && next.nowVisible) {
-
-        // The next activity is already visible, so hide the previous
-        // activity's windows right now so we can show the new one ASAP.
-        // We only do this if the previous is finishing, which should mean
-        // it is on top of the one being resumed so hiding it quickly
-        // is good.  Otherwise, we want to do the normal route of allowing
-        // the resumed activity to be shown so we can decide if the
-        // previous should actually be hidden depending on whether the
-        // new one is found to be full-screen or not.
         if (prev.finishing) {
             prev.setVisibility(false);
-            if (DEBUG_SWITCH) Slog.v(TAG_SWITCH,
-                    "Not waiting for visible to hide: " + prev
-                    + ", nowVisible=" + next.nowVisible);
-        } else {
-            if (DEBUG_SWITCH) Slog.v(TAG_SWITCH,
-                    "Previous already visible but still waiting to hide: " + prev
-                    + ", nowVisible=" + next.nowVisible);
-        }
-
-    }
-
-    // Launching this app's activity, make sure the app is no longer
-    // considered stopped.
-    try {
-        mAtmService.getPackageManager().setPackageStoppedState(
-                next.packageName, false, next.mUserId); /* TODO: Verify if correct userid */
-    } catch (RemoteException e1) {
-    } catch (IllegalArgumentException e) {
-        Slog.w(TAG, "Failed trying to unstop package "
-                + next.packageName + ": " + e);
-    }
-
-    // We are starting up the next activity, so tell the window manager
-    // that the previous one will be hidden soon.  This way it can know
-    // to ignore it when computing the desired screen orientation.
-    boolean anim = true;
-    final DisplayContent dc = taskDisplayArea.mDisplayContent;
-    if (prev != null) {
-        if (prev.finishing) {
-            if (DEBUG_TRANSITION) Slog.v(TAG_TRANSITION,
-                    "Prepare close transition: prev=" + prev);
-            if (mStackSupervisor.mNoAnimActivities.contains(prev)) {
-                anim = false;
-                dc.prepareAppTransition(TRANSIT_NONE, false);
-            } else {
-                dc.prepareAppTransition(
-                        prev.getTask() == next.getTask() ? TRANSIT_ACTIVITY_CLOSE
-                                : TRANSIT_TASK_CLOSE, false);
-            }
-            prev.setVisibility(false);
-        } else {
-            if (DEBUG_TRANSITION) Slog.v(TAG_TRANSITION,
-                    "Prepare open transition: prev=" + prev);
-            if (mStackSupervisor.mNoAnimActivities.contains(next)) {
-                anim = false;
-                dc.prepareAppTransition(TRANSIT_NONE, false);
-            } else {
-                dc.prepareAppTransition(
-                        prev.getTask() == next.getTask() ? TRANSIT_ACTIVITY_OPEN
-                                : next.mLaunchTaskBehind ? TRANSIT_TASK_OPEN_BEHIND
-                                        : TRANSIT_TASK_OPEN, false);
-            }
-        }
-    } else {
-        if (DEBUG_TRANSITION) Slog.v(TAG_TRANSITION, "Prepare open transition: no previous");
-        if (mStackSupervisor.mNoAnimActivities.contains(next)) {
-            anim = false;
-            dc.prepareAppTransition(TRANSIT_NONE, false);
-        } else {
-            dc.prepareAppTransition(TRANSIT_ACTIVITY_OPEN, false);
         }
     }
 
-    if (anim) {
-        next.applyOptionsLocked();
-    } else {
-        next.clearOptionsLocked();
-    }
+    //修改启动Activity的package的状态
+    mAtmService.getPackageManager().setPackageStoppedState(
+                next.packageName, false, next.mUserId);
 
-    mStackSupervisor.mNoAnimActivities.clear();
+    ... //Activity转场动画准备
 
-    if (next.attachedToProcess()) {
-        if (DEBUG_SWITCH) Slog.v(TAG_SWITCH, "Resume running: " + next
-                + " stopped=" + next.stopped
-                + " visibleRequested=" + next.mVisibleRequested);
-
-        // If the previous activity is translucent, force a visibility update of
-        // the next activity, so that it's added to WM's opening app list, and
-        // transition animation can be set up properly.
-        // For example, pressing Home button with a translucent activity in focus.
-        // Launcher is already visible in this case. If we don't add it to opening
-        // apps, maybeUpdateTransitToWallpaper() will fail to identify this as a
-        // TRANSIT_WALLPAPER_OPEN animation, and run some funny animation.
-        final boolean lastActivityTranslucent = lastFocusedStack != null
-                && (lastFocusedStack.inMultiWindowMode()
-                || (lastFocusedStack.mLastPausedActivity != null
-                && !lastFocusedStack.mLastPausedActivity.occludesParent()));
-
-        // This activity is now becoming visible.
-        if (!next.mVisibleRequested || next.stopped || lastActivityTranslucent) {
-            next.setVisibility(true);
-        }
-
-        // schedule launch ticks to collect information about slow apps.
-        next.startLaunchTickingLocked();
-
+    if (next.attachedToProcess()) { //对于将要启动的ActivityRecord来说，此时尚未完成和Process的绑定，返回false
+        ...
         ActivityRecord lastResumedActivity =
                 lastFocusedStack == null ? null : lastFocusedStack.mResumedActivity;
+        //保存状态以做后面恢复使用
         final ActivityState lastState = next.getState();
 
         mAtmService.updateCpuStats();
 
-        if (DEBUG_STATES) Slog.v(TAG_STATES, "Moving to RESUMED: " + next
-                + " (in existing)");
-
+        //更新ActivityRecord状态
         next.setState(RESUMED, "resumeTopActivityInnerLocked");
 
+        //更新启动Activity的进程信息并将其移至lru列表的头部
         next.app.updateProcessInfo(false /* updateServiceConnectionActivities */,
                 true /* activityChange */, true /* updateOomAdj */,
                 true /* addPendingTopUid */);
 
-        // Have the window manager re-evaluate the orientation of
-        // the screen based on the new activity order.
-        boolean notUpdated = true;
-
-        // Activity should also be visible if set mLaunchTaskBehind to true (see
-        // ActivityRecord#shouldBeVisibleIgnoringKeyguard()).
-        if (shouldBeVisible(next)) {
-            // We have special rotation behavior when here is some active activity that
-            // requests specific orientation or Keyguard is locked. Make sure all activity
-            // visibilities are set correctly as well as the transition is updated if needed
-            // to get the correct rotation behavior. Otherwise the following call to update
-            // the orientation may cause incorrect configurations delivered to client as a
-            // result of invisible window resize.
-            // TODO: Remove this once visibilities are set correctly immediately when
-            // starting an activity.
-            notUpdated = !mRootWindowContainer.ensureVisibilityAndConfig(next, getDisplayId(),
-                    true /* markFrozenIfConfigChanged */, false /* deferResume */);
-        }
-
-        if (notUpdated) {
-            // The configuration update wasn't able to keep the existing
-            // instance of the activity, and instead started a new one.
-            // We should be all done, but let's just make sure our activity
-            // is still at the top and schedule another run if something
-            // weird happened.
-            ActivityRecord nextNext = topRunningActivity();
-            if (DEBUG_SWITCH || DEBUG_STATES) Slog.i(TAG_STATES,
-                    "Activity config changed during resume: " + next
-                            + ", new next: " + nextNext);
-            if (nextNext != next) {
-                // Do over!
-                mStackSupervisor.scheduleResumeTopActivities();
-            }
-            if (!next.mVisibleRequested || next.stopped) {
-                next.setVisibility(true);
-            }
-            next.completeResumeLocked();
-            return true;
-        }
+        ... //更新Activity显示、方向和Configuration
 
         try {
             final ClientTransaction transaction =
@@ -1231,32 +1065,23 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
             mAtmService.getAppWarningsLocked().onResumeActivity(next);
             next.app.setPendingUiCleanAndForceProcessStateUpTo(mAtmService.mTopProcessState);
             next.clearOptionsLocked();
+            //设置onResume生命周期请求
             transaction.setLifecycleStateRequest(
                     ResumeActivityItem.obtain(next.app.getReportedProcState(),
                             dc.isNextTransitionForward()));
+            //调度执行Activity onResume生命周期
             mAtmService.getLifecycleManager().scheduleTransaction(transaction);
 
             if (DEBUG_STATES) Slog.d(TAG_STATES, "resumeTopActivityLocked: Resumed "
                     + next);
-        } catch (Exception e) {
-            // Whoops, need to restart this activity!
-            if (DEBUG_STATES) Slog.v(TAG_STATES, "Resume failed; resetting state to "
-                    + lastState + ": " + next);
+        } catch (Exception e) { //resume失败需要尝试restart
+            //恢复初始状态
             next.setState(lastState, "resumeTopActivityInnerLocked");
-
-            // lastResumedActivity being non-null implies there is a lastStack present.
             if (lastResumedActivity != null) {
                 lastResumedActivity.setState(RESUMED, "resumeTopActivityInnerLocked");
             }
-
-            Slog.i(TAG, "Restarting because process died: " + next);
-            if (!next.hasBeenLaunched) {
-                next.hasBeenLaunched = true;
-            } else  if (SHOW_APP_STARTING_PREVIEW && lastFocusedStack != null
-                    && lastFocusedStack.isTopStackInDisplayArea()) {
-                next.showStartingWindow(null /* prev */, false /* newTask */,
-                        false /* taskSwitch */);
-            }
+            ...
+            //重新启动Activity
             mStackSupervisor.startSpecificActivity(next, true, false);
             return true;
         }
@@ -1264,6 +1089,7 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
         // From this point on, if something goes wrong there is no way
         // to recover the activity.
         try {
+            //更新信息
             next.completeResumeLocked();
         } catch (Exception e) {
             // If any exception gets thrown, toss away this
@@ -1272,7 +1098,7 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
             next.finishIfPossible("resume-exception", true /* oomAdj */);
             return true;
         }
-    } else {
+    } else { //尚未绑定Process
         // Whoops, need to restart this activity!
         if (!next.hasBeenLaunched) {
             next.hasBeenLaunched = true;
@@ -1281,12 +1107,39 @@ private boolean resumeTopActivityInnerLocked(ActivityRecord prev, ActivityOption
                 next.showStartingWindow(null /* prev */, false /* newTask */,
                         false /* taskSwich */);
             }
-            if (DEBUG_SWITCH) Slog.v(TAG_SWITCH, "Restarting: " + next);
         }
-        if (DEBUG_STATES) Slog.d(TAG_STATES, "resumeTopActivityLocked: Restarting " + next);
+        //启动Activity
         mStackSupervisor.startSpecificActivity(next, true, true);
     }
 
     return true;
 }
 ```
+
+这里的代码很长，其实我们只需要关注三个点：
+
+1. `Pause`掉其他`Activity`
+
+2. 如果对应`App`尚未启动，启动`App`进程
+
+3. 启动`Activity`
+
+第一步，在启动`Activity`前，我们需要先`Pause`掉其他`Activity`，这一点很好理解，我们可以对照着看`Activity`生命周期也是这样的，这里会通过`ATMS`跨进程调用相应`Activity`的`onPause`生命周期，等待`onPause`执行完成后，再跨进程调用回`ATMS`，经过一系列方法调用，又重新调用`resumeTopActivityInnerLocked`方法，继续执行下一步操作
+
+第二步，如果`App`尚未启动，则先去启动`App`进程，这主要体现在这里
+
+```java
+if (!next.isProcessRunning()) { //App进程未启动
+    //启动App进程
+    mAtmService.startProcessAsync(next, false /* knownToBeDead */, isTop,
+            isTop ? "pre-top-activity" : "pre-activity");
+}
+```
+
+在启动完`App`进程后，会调用`ATMS`的`attachApplication`方法，最终调用到`ActivityStackSupervisor.realStartActivityLocked`方法启动`Activity`，这个方法后面会讲
+
+第三步，如果`App`进程已经启动，这时候会调用`ActivityStackSupervisor.startSpecificActivity`方法，最终殊途同归调用`ActivityStackSupervisor.realStartActivityLocked`方法启动`Activity`
+
+# 结束
+
+这里篇幅有点过长了，所以我觉得还是分篇比较好，这一章其实重要内容不是很多，最主要的内容，像`Activity`的生命周期控制，`App`进程的启动，`Activity`具体的启动及其后续生命周期执行都会放在下一章来讲
