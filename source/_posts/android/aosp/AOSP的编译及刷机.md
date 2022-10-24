@@ -14,8 +14,9 @@ categories:
 
 - 一台可以解BL锁（BootLoader），并且厂商提供了硬件驱动的设备，这里推荐使用Google亲儿子手机（Nexus、Pixel系列），可以解BL锁，Google官方会提供硬件驱动，并且AOSP里会提供对应机型的配置
 - 一块剩余空间至少大于300GB的硬盘（Android11源码-150GB左右，编译产物-150GB左右）
-- 系统最好为Linux，MacOS也可（Windows可以用WSL）
-- 内存至少要8GB，过小的内存会导致生成build.ninja文件失败（官方要求至少16GB，我实测8GB也可）
+- ~~系统最好为Linux，MacOS也可（Windows可以用WSL）~~
+- 系统需要使用Ubuntu（我不确定别的Linux发行版可不可用），自2021年6月22日起，AOSP不再支持在Windows或MacOS上构建（Windows可以尝试使用WSL，但是本人没能成功）
+- 内存至少要16GB，过小的内存会导致生成build.ninja文件失败
 
 这里是Google官方的推荐要求：<https://source.android.com/setup/build/requirements?hl=zh-cN>
 
