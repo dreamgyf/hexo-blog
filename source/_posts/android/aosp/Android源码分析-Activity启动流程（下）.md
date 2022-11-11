@@ -19,6 +19,8 @@ categories:
 
 # 启动App进程
 
+## 准备ProcessRecord
+
 我们从App进程的启动开始说起，上篇文章中我们说过了，如果App尚未启动，则会调用`ATMS`的`startProcessAsync`方法去启动App进程
 
 ```java
@@ -383,6 +385,7 @@ boolean startProcessLocked(HostingRecord hostingRecord, String entryPoint, Proce
     app.setStartParams(uid, hostingRecord, seInfo, startTime);
     app.setUsingWrapper(invokeWith != null
             || Zygote.getWrapProperty(app.processName) != null);
+    //将ProcessRecord添加到待启动列表中
     mPendingStarts.put(startSeq, app);
 
     if (mService.mConstants.FLAG_PROCESS_START_ASYNC) {    //异步启动进程
@@ -414,6 +417,8 @@ boolean startProcessLocked(HostingRecord hostingRecord, String entryPoint, Proce
 在异步模式下，程序会等待`ProcessRecord.mPrecedence`进程结束才会启动进程（这里对应着最开始的`startProcessLocked`方法中，已经存在了对应App的`ProcessRecord`，并且分配了`pid`，但是进程被标记为死亡这种情况）
 
 最终都会进入到`startProcess`和`handleProcessStartedLocked`方法中来
+
+## startProcess
 
 ```java
 private Process.ProcessStartResult startProcess(HostingRecord hostingRecord, String entryPoint,
@@ -527,6 +532,8 @@ private Process.ProcessStartResult startProcess(HostingRecord hostingRecord, Str
 从`Android 11`开始引入了应用目录隔离机制，使得应用仅可以发现和访问自己的储存目录，不可以访问其他应用的储存目录
 
 这里处理完应用目录隔离机制后，调用了`Process.start`方法启动进程，最终走到`ZygoteProcess.startViaZygote`方法
+
+### 向zygoto发送socket请求
 
 ```java
 private Process.ProcessStartResult startViaZygote(@NonNull final String processClass,
@@ -774,4 +781,635 @@ private Process.ProcessStartResult zygoteSendArgsAndGetResult(
 }
 ```
 
-`USAP`机制我们先跳过，这个方法
+`USAP`机制我们先跳过，这个方法就做了一件事：拼装参数，然后调用`attemptZygoteSendArgsAndGetResult`方法
+
+```java
+private Process.ProcessStartResult attemptZygoteSendArgsAndGetResult(
+        ZygoteState zygoteState, String msgStr) throws ZygoteStartFailedEx {
+    try {
+        final BufferedWriter zygoteWriter = zygoteState.mZygoteOutputWriter;
+        final DataInputStream zygoteInputStream = zygoteState.mZygoteInputStream;
+
+        zygoteWriter.write(msgStr);
+        zygoteWriter.flush();
+
+        // Always read the entire result from the input stream to avoid leaving
+        // bytes in the stream for future process starts to accidentally stumble
+        // upon.
+        Process.ProcessStartResult result = new Process.ProcessStartResult();
+        result.pid = zygoteInputStream.readInt();
+        result.usingWrapper = zygoteInputStream.readBoolean();
+
+        if (result.pid < 0) {
+            throw new ZygoteStartFailedEx("fork() failed");
+        }
+
+        return result;
+    } catch (IOException ex) {
+        zygoteState.close();
+        Log.e(LOG_TAG, "IO Exception while communicating with Zygote - "
+                + ex.toString());
+        throw new ZygoteStartFailedEx(ex);
+    }
+}
+```
+
+这个方法很明显就能看出来，这是一次`socket`通信发送 -> 接收
+
+具体`zygote`进程接收到`socket`后做了什么可以回顾我之前写的文章 [Android源码分析 - Zygote进程](https://juejin.cn/post/7051507161955827720#heading-29)
+
+## handleProcessStartedLocked
+
+向`zygote`发送完`socket`请求后，`zygote`开始`fork`App进程，`fork`完后会将App进程的`pid`和`usingWrapper`信息再通过`socket`传回`system_server`，此时程序会继续执行`handleProcessStartedLocked`方法
+
+```java
+boolean handleProcessStartedLocked(ProcessRecord app, int pid, boolean usingWrapper,
+        long expectedStartSeq, boolean procAttached) {
+    //从待启动列表中移除此ProcessRecord
+    mPendingStarts.remove(expectedStartSeq);
+    final String reason = isProcStartValidLocked(app, expectedStartSeq);
+    //未通过进程启动验证，杀死进程
+    if (reason != null) {
+        app.pendingStart = false;
+        killProcessQuiet(pid);
+        Process.killProcessGroup(app.uid, app.pid);
+        noteAppKill(app, ApplicationExitInfo.REASON_OTHER,
+                ApplicationExitInfo.SUBREASON_INVALID_START, reason);
+        return false;
+    }
+    
+    ... //记录进程启动
+
+    //通知看门狗有进程启动
+    Watchdog.getInstance().processStarted(app.processName, pid);
+
+    ... //记录进程启动
+
+    //设置ProcessRecord
+    app.setPid(pid);
+    app.setUsingWrapper(usingWrapper);
+    app.pendingStart = false;
+    //从PidMap中获取未清理的ProcessRecord
+    ProcessRecord oldApp;
+    synchronized (mService.mPidsSelfLocked) {
+        oldApp = mService.mPidsSelfLocked.get(pid);
+    }
+    // If there is already an app occupying that pid that hasn't been cleaned up
+    //清理ProcessRecord
+    if (oldApp != null && !app.isolated) {
+        mService.cleanUpApplicationRecordLocked(oldApp, false, false, -1,
+                true /*replacingPid*/);
+    }
+    //将ProcessRecord添加到PidMap中
+    mService.addPidLocked(app);
+    synchronized (mService.mPidsSelfLocked) {
+        //attach超时检测
+        if (!procAttached) {
+            Message msg = mService.mHandler.obtainMessage(PROC_START_TIMEOUT_MSG);
+            msg.obj = app;
+            mService.mHandler.sendMessageDelayed(msg, usingWrapper
+                    ? PROC_START_TIMEOUT_WITH_WRAPPER : PROC_START_TIMEOUT);
+        }
+    }
+    return true;
+}
+```
+
+这个方法将从`zygote` `fork`后得到的信息设置到`ProcessRecord`中，然后将此`ProcessRecord`添加到`PidMap`中（`AMS.mPidsSelfLocked`），后续当`attachApplication`时会用到它
+
+# ActivityThread
+
+`zygote`进程将App进程`fork`出来后，便通过反射调用我们之前设置的`entryPoint`类的`main`方法，即`android.app.ActivityThread.main(String[] args)`方法
+
+```java
+public static void main(String[] args) {
+    // Install selective syscall interception
+    //设置拦截器，拦截部分系统调用自行处理
+    AndroidOs.install();
+
+    // CloseGuard defaults to true and can be quite spammy.  We
+    // disable it here, but selectively enable it later (via
+    // StrictMode) on debug builds, but using DropBox, not logs.
+    //资源关闭检测器
+    CloseGuard.setEnabled(false);
+
+    //初始化用户环境
+    Environment.initForCurrentUser();
+
+    // Make sure TrustedCertificateStore looks in the right place for CA certificates
+    //设置CA证书搜索位置
+    final File configDir = Environment.getUserConfigDirectory(UserHandle.myUserId());
+    TrustedCertificateStore.setDefaultUserDirectory(configDir);
+
+    // Call per-process mainline module initialization.
+    //初始化主模块各个注册服务
+    initializeMainlineModules();
+
+    //预设进程名
+    Process.setArgV0("<pre-initialized>");
+
+    //准备Looper
+    Looper.prepareMainLooper();
+
+    // Find the value for {@link #PROC_START_SEQ_IDENT} if provided on the command line.
+    // It will be in the format "seq=114"
+    //查找startSeq参数
+    long startSeq = 0;
+    if (args != null) {
+        for (int i = args.length - 1; i >= 0; --i) {
+            if (args[i] != null && args[i].startsWith(PROC_START_SEQ_IDENT)) {
+                startSeq = Long.parseLong(
+                        args[i].substring(PROC_START_SEQ_IDENT.length()));
+            }
+        }
+    }
+    //创建App进程ActivityThread实例
+    ActivityThread thread = new ActivityThread();
+    thread.attach(false, startSeq);
+
+    //设置全局Handler
+    if (sMainThreadHandler == null) {
+        sMainThreadHandler = thread.getHandler();
+    }
+
+    //Looper循环处理消息
+    Looper.loop();
+
+    throw new RuntimeException("Main thread loop unexpectedly exited");
+}
+```
+
+在`main`方法中主要做了两件事，一是启动`Looper`，循环处理消息，保证进程不会退出，二是实例化`ActivityThread`并执行`attach`方法
+
+```java
+private void attach(boolean system, long startSeq) {
+    sCurrentActivityThread = this;
+    mConfigurationController = new ConfigurationController(this);
+    mSystemThread = system;
+    if (!system) {    //非系统ActivityThread
+        //预设进程名
+        android.ddm.DdmHandleAppName.setAppName("<pre-initialized>",
+                                                UserHandle.myUserId());
+        //处理一些错误异常需要使用ActivityThread，将其传入
+        RuntimeInit.setApplicationObject(mAppThread.asBinder());
+        //AMS代理binder对象
+        final IActivityManager mgr = ActivityManager.getService();
+        try {
+            //执行AMS.attachApplication方法
+            mgr.attachApplication(mAppThread, startSeq);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+        // Watch for getting close to heap limit.
+        //每次GC时检测内存，如果内存不足则会尝试释放部分不可见的Activity
+        BinderInternal.addGcWatcher(new Runnable() {
+            @Override public void run() {
+                if (!mSomeActivitiesChanged) {
+                    return;
+                }
+                Runtime runtime = Runtime.getRuntime();
+                long dalvikMax = runtime.maxMemory();
+                long dalvikUsed = runtime.totalMemory() - runtime.freeMemory();
+                if (dalvikUsed > ((3*dalvikMax)/4)) {
+                    if (DEBUG_MEMORY_TRIM) Slog.d(TAG, "Dalvik max=" + (dalvikMax/1024)
+                            + " total=" + (runtime.totalMemory()/1024)
+                            + " used=" + (dalvikUsed/1024));
+                    mSomeActivitiesChanged = false;
+                    try {
+                        ActivityTaskManager.getService().releaseSomeActivities(mAppThread);
+                    } catch (RemoteException e) {
+                        throw e.rethrowFromSystemServer();
+                    }
+                }
+            }
+        });
+    } else {    //系统ActivityThread
+        ...
+    }
+
+    //处理ConfigChanged相关逻辑（屏幕旋转之类）
+    ViewRootImpl.ConfigChangedCallback configChangedCallback = (Configuration globalConfig) -> {
+        synchronized (mResourcesManager) {
+            // We need to apply this change to the resources immediately, because upon returning
+            // the view hierarchy will be informed about it.
+            if (mResourcesManager.applyConfigurationToResources(globalConfig,
+                    null /* compat */)) {
+                mConfigurationController.updateLocaleListFromAppContext(
+                        mInitialApplication.getApplicationContext());
+
+                // This actually changed the resources! Tell everyone about it.
+                final Configuration updatedConfig =
+                        mConfigurationController.updatePendingConfiguration(globalConfig);
+                if (updatedConfig != null) {
+                    sendMessage(H.CONFIGURATION_CHANGED, globalConfig);
+                    mPendingConfiguration = updatedConfig;
+                }
+            }
+        }
+    };
+    ViewRootImpl.addConfigCallback(configChangedCallback);
+}
+```
+
+而`attach`方法最重要的一步又是调用了`AMS`的`attachApplication`方法
+
+```java
+public final void attachApplication(IApplicationThread thread, long startSeq) {
+    if (thread == null) {
+        throw new SecurityException("Invalid application interface");
+    }
+    synchronized (this) {
+        int callingPid = Binder.getCallingPid();
+        final int callingUid = Binder.getCallingUid();
+        final long origId = Binder.clearCallingIdentity();
+        attachApplicationLocked(thread, callingPid, callingUid, startSeq);
+        Binder.restoreCallingIdentity(origId);
+    }
+}
+
+private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
+        int pid, int callingUid, long startSeq) {
+
+    // Find the application record that is being attached...  either via
+    // the pid if we are running in multiple processes, or just pull the
+    // next app record if we are emulating process with anonymous threads.
+    ProcessRecord app;
+    long startTime = SystemClock.uptimeMillis();
+    long bindApplicationTimeMillis;
+    if (pid != MY_PID && pid >= 0) {
+        //通过pid查找PidMap中存在的ProcessRecord
+        //对应着handleProcessStartedLocked方法中执行的中的mService.addPidLocked方法
+        //在进程同步启动模式下，这里应该是必能取到的
+        synchronized (mPidsSelfLocked) {
+            app = mPidsSelfLocked.get(pid);
+        }
+        //如果此ProcessRecord对不上App的ProcessRecord，则将其清理掉
+        if (app != null && (app.startUid != callingUid || app.startSeq != startSeq)) {
+            ...
+            // If there is already an app occupying that pid that hasn't been cleaned up
+            cleanUpApplicationRecordLocked(app, false, false, -1,
+                        true /*replacingPid*/);
+            removePidLocked(app);
+            app = null;
+        }
+    } else {
+        app = null;
+    }
+
+    // It's possible that process called attachApplication before we got a chance to
+    // update the internal state.
+    //在进程异步启动模式下，有可能尚未执行到handleProcessStartedLocked方法
+    //所以从PidMap中无法取到相应的ProcessRecord
+    //这时候从ProcessList.mPendingStarts这个待启动列表中获取ProcessRecord
+    if (app == null && startSeq > 0) {
+        final ProcessRecord pending = mProcessList.mPendingStarts.get(startSeq);
+        if (pending != null && pending.startUid == callingUid && pending.startSeq == startSeq
+                && mProcessList.handleProcessStartedLocked(pending, pid, pending
+                        .isUsingWrapper(),
+                        startSeq, true)) {
+            app = pending;
+        }
+    }
+
+    //没有找到相应的ProcessRecord，杀死进程
+    if (app == null) {
+        if (pid > 0 && pid != MY_PID) {
+            killProcessQuiet(pid);
+        } else {
+            try {
+                thread.scheduleExit();
+            } catch (Exception e) {
+                // Ignore exceptions.
+            }
+        }
+        return false;
+    }
+
+    // If this application record is still attached to a previous
+    // process, clean it up now.
+    //如果ProcessRecord绑定了其他的ApplicationThread，则需要清理这个进程
+    if (app.thread != null) {
+        handleAppDiedLocked(app, true, true);
+    }
+
+    final String processName = app.processName;
+    try {
+        //注册App进程死亡回调
+        AppDeathRecipient adr = new AppDeathRecipient(
+                app, pid, thread);
+        thread.asBinder().linkToDeath(adr, 0);
+        app.deathRecipient = adr;
+    } catch (RemoteException e) {
+        //如果出现异常则重启进程
+        app.resetPackageList(mProcessStats);
+        mProcessList.startProcessLocked(app,
+                new HostingRecord("link fail", processName),
+                ZYGOTE_POLICY_FLAG_EMPTY);
+        return false;
+    }
+
+    //初始化ProcessRecord各参数
+    app.curAdj = app.setAdj = app.verifiedAdj = ProcessList.INVALID_ADJ;
+    mOomAdjuster.setAttachingSchedGroupLocked(app);
+    app.forcingToImportant = null;
+    updateProcessForegroundLocked(app, false, 0, false);
+    app.hasShownUi = false;
+    app.setDebugging(false);
+    app.setCached(false);
+    app.killedByAm = false;
+    app.killed = false;
+
+
+    // We carefully use the same state that PackageManager uses for
+    // filtering, since we use this flag to decide if we need to install
+    // providers when user is unlocked later
+    app.unlocked = StorageManager.isUserKeyUnlocked(app.userId);
+
+    //移除之前在handleProcessStartedLocked中设置的attach超时检测
+    mHandler.removeMessages(PROC_START_TIMEOUT_MSG, app);
+
+    //普通App启动肯定在system_server准备完成后，所以此处为true
+    boolean normalMode = mProcessesReady || isAllowedWhileBooting(app.info);
+    List<ProviderInfo> providers = normalMode ? generateApplicationProvidersLocked(app) : null;
+    //设置ContentProvider启动超时检测
+    if (providers != null && checkAppInLaunchingProvidersLocked(app)) {
+        Message msg = mHandler.obtainMessage(CONTENT_PROVIDER_PUBLISH_TIMEOUT_MSG);
+        msg.obj = app;
+        mHandler.sendMessageDelayed(msg,
+                ContentResolver.CONTENT_PROVIDER_PUBLISH_TIMEOUT_MILLIS);
+    }
+
+    final BackupRecord backupTarget = mBackupTargets.get(app.userId);
+    try {
+        //对应着开发者模式里的 Select debug app 和 Wait for debugger
+        int testMode = ApplicationThreadConstants.DEBUG_OFF;
+        if (mDebugApp != null && mDebugApp.equals(processName)) {
+            testMode = mWaitForDebugger
+                ? ApplicationThreadConstants.DEBUG_WAIT
+                : ApplicationThreadConstants.DEBUG_ON;
+            app.setDebugging(true);
+            if (mDebugTransient) {
+                mDebugApp = mOrigDebugApp;
+                mWaitForDebugger = mOrigWaitForDebugger;
+            }
+        }
+
+        boolean enableTrackAllocation = false;
+        if (mTrackAllocationApp != null && mTrackAllocationApp.equals(processName)) {
+            enableTrackAllocation = true;
+            mTrackAllocationApp = null;
+        }
+
+        // If the app is being launched for restore or full backup, set it up specially
+        boolean isRestrictedBackupMode = false;
+        ... //备份相关
+
+        final ActiveInstrumentation instr = app.getActiveInstrumentation();
+
+        if (instr != null) {
+            notifyPackageUse(instr.mClass.getPackageName(),
+                                PackageManager.NOTIFY_PACKAGE_USE_INSTRUMENTATION);
+        }
+        ApplicationInfo appInfo = instr != null ? instr.mTargetInfo : app.info;
+        app.compat = compatibilityInfoForPackage(appInfo);
+
+        ProfilerInfo profilerInfo = null;
+        String preBindAgent = null;
+        if (mProfileData.getProfileApp() != null
+                && mProfileData.getProfileApp().equals(processName)) {
+            mProfileData.setProfileProc(app);
+            if (mProfileData.getProfilerInfo() != null) {
+                // Send a profiler info object to the app if either a file is given, or
+                // an agent should be loaded at bind-time.
+                boolean needsInfo = mProfileData.getProfilerInfo().profileFile != null
+                        || mProfileData.getProfilerInfo().attachAgentDuringBind;
+                profilerInfo = needsInfo
+                        ? new ProfilerInfo(mProfileData.getProfilerInfo()) : null;
+                if (mProfileData.getProfilerInfo().agent != null) {
+                    preBindAgent = mProfileData.getProfilerInfo().agent;
+                }
+            }
+        } else if (instr != null && instr.mProfileFile != null) {
+            profilerInfo = new ProfilerInfo(instr.mProfileFile, null, 0, false, false,
+                    null, false);
+        }
+        if (mAppAgentMap != null && mAppAgentMap.containsKey(processName)) {
+            // We need to do a debuggable check here. See setAgentApp for why the check is
+            // postponed to here.
+            if ((app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+                String agent = mAppAgentMap.get(processName);
+                // Do not overwrite already requested agent.
+                if (profilerInfo == null) {
+                    profilerInfo = new ProfilerInfo(null, null, 0, false, false,
+                            mAppAgentMap.get(processName), true);
+                } else if (profilerInfo.agent == null) {
+                    profilerInfo = profilerInfo.setAgent(mAppAgentMap.get(processName), true);
+                }
+            }
+        }
+
+        if (profilerInfo != null && profilerInfo.profileFd != null) {
+            profilerInfo.profileFd = profilerInfo.profileFd.dup();
+            if (TextUtils.equals(mProfileData.getProfileApp(), processName)
+                    && mProfileData.getProfilerInfo() != null) {
+                clearProfilerLocked();
+            }
+        }
+
+        // We deprecated Build.SERIAL and it is not accessible to
+        // Instant Apps and target APIs higher than O MR1. Since access to the serial
+        // is now behind a permission we push down the value.
+        final String buildSerial = (!appInfo.isInstantApp()
+                && appInfo.targetSdkVersion < Build.VERSION_CODES.P)
+                        ? sTheRealBuildSerial : Build.UNKNOWN;
+
+        // Check if this is a secondary process that should be incorporated into some
+        // currently active instrumentation.  (Note we do this AFTER all of the profiling
+        // stuff above because profiling can currently happen only in the primary
+        // instrumentation process.)
+        if (mActiveInstrumentation.size() > 0 && instr == null) {
+            for (int i = mActiveInstrumentation.size() - 1;
+                    i >= 0 && app.getActiveInstrumentation() == null; i--) {
+                ActiveInstrumentation aInstr = mActiveInstrumentation.get(i);
+                if (!aInstr.mFinished && aInstr.mTargetInfo.uid == app.uid) {
+                    if (aInstr.mTargetProcesses.length == 0) {
+                        // This is the wildcard mode, where every process brought up for
+                        // the target instrumentation should be included.
+                        if (aInstr.mTargetInfo.packageName.equals(app.info.packageName)) {
+                            app.setActiveInstrumentation(aInstr);
+                            aInstr.mRunningProcesses.add(app);
+                        }
+                    } else {
+                        for (String proc : aInstr.mTargetProcesses) {
+                            if (proc.equals(app.processName)) {
+                                app.setActiveInstrumentation(aInstr);
+                                aInstr.mRunningProcesses.add(app);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // If we were asked to attach an agent on startup, do so now, before we're binding
+        // application code.
+        if (preBindAgent != null) {
+            thread.attachAgent(preBindAgent);
+        }
+        if ((app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            thread.attachStartupAgents(app.info.dataDir);
+        }
+
+        // Figure out whether the app needs to run in autofill compat mode.
+        AutofillOptions autofillOptions = null;
+        if (UserHandle.getAppId(app.info.uid) >= Process.FIRST_APPLICATION_UID) {
+            final AutofillManagerInternal afm = LocalServices.getService(
+                    AutofillManagerInternal.class);
+            if (afm != null) {
+                autofillOptions = afm.getAutofillOptions(
+                        app.info.packageName, app.info.longVersionCode, app.userId);
+            }
+        }
+        ContentCaptureOptions contentCaptureOptions = null;
+        if (UserHandle.getAppId(app.info.uid) >= Process.FIRST_APPLICATION_UID) {
+            final ContentCaptureManagerInternal ccm =
+                    LocalServices.getService(ContentCaptureManagerInternal.class);
+            if (ccm != null) {
+                contentCaptureOptions = ccm.getOptionsForPackage(app.userId,
+                        app.info.packageName);
+            }
+        }
+
+        checkTime(startTime, "attachApplicationLocked: immediately before bindApplication");
+        bindApplicationTimeMillis = SystemClock.elapsedRealtime();
+        mAtmInternal.preBindApplication(app.getWindowProcessController());
+        final ActiveInstrumentation instr2 = app.getActiveInstrumentation();
+        if (mPlatformCompat != null) {
+            mPlatformCompat.resetReporting(app.info);
+        }
+        final ProviderInfoList providerList = ProviderInfoList.fromList(providers);
+        if (app.isolatedEntryPoint != null) {
+            // This is an isolated process which should just call an entry point instead of
+            // being bound to an application.
+            thread.runIsolatedEntryPoint(app.isolatedEntryPoint, app.isolatedEntryPointArgs);
+        } else if (instr2 != null) {
+            thread.bindApplication(processName, appInfo, providerList,
+                    instr2.mClass,
+                    profilerInfo, instr2.mArguments,
+                    instr2.mWatcher,
+                    instr2.mUiAutomationConnection, testMode,
+                    mBinderTransactionTrackingEnabled, enableTrackAllocation,
+                    isRestrictedBackupMode || !normalMode, app.isPersistent(),
+                    new Configuration(app.getWindowProcessController().getConfiguration()),
+                    app.compat, getCommonServicesLocked(app.isolated),
+                    mCoreSettingsObserver.getCoreSettingsLocked(),
+                    buildSerial, autofillOptions, contentCaptureOptions,
+                    app.mDisabledCompatChanges);
+        } else {
+            thread.bindApplication(processName, appInfo, providerList, null, profilerInfo,
+                    null, null, null, testMode,
+                    mBinderTransactionTrackingEnabled, enableTrackAllocation,
+                    isRestrictedBackupMode || !normalMode, app.isPersistent(),
+                    new Configuration(app.getWindowProcessController().getConfiguration()),
+                    app.compat, getCommonServicesLocked(app.isolated),
+                    mCoreSettingsObserver.getCoreSettingsLocked(),
+                    buildSerial, autofillOptions, contentCaptureOptions,
+                    app.mDisabledCompatChanges);
+        }
+        if (profilerInfo != null) {
+            profilerInfo.closeFd();
+            profilerInfo = null;
+        }
+
+        // Make app active after binding application or client may be running requests (e.g
+        // starting activities) before it is ready.
+        app.makeActive(thread, mProcessStats);
+        checkTime(startTime, "attachApplicationLocked: immediately after bindApplication");
+        mProcessList.updateLruProcessLocked(app, false, null);
+        checkTime(startTime, "attachApplicationLocked: after updateLruProcessLocked");
+        app.lastRequestedGc = app.lastLowMemory = SystemClock.uptimeMillis();
+    } catch (Exception e) {
+        // We need kill the process group here. (b/148588589)
+        Slog.wtf(TAG, "Exception thrown during bind of " + app, e);
+        app.resetPackageList(mProcessStats);
+        app.unlinkDeathRecipient();
+        app.kill("error during bind", ApplicationExitInfo.REASON_INITIALIZATION_FAILURE, true);
+        handleAppDiedLocked(app, false, true);
+        return false;
+    }
+
+    // Remove this record from the list of starting applications.
+    mPersistentStartingProcesses.remove(app);
+    if (DEBUG_PROCESSES && mProcessesOnHold.contains(app)) Slog.v(TAG_PROCESSES,
+            "Attach application locked removing on hold: " + app);
+    mProcessesOnHold.remove(app);
+
+    boolean badApp = false;
+    boolean didSomething = false;
+
+    // See if the top visible activity is waiting to run in this process...
+    if (normalMode) {
+        try {
+            didSomething = mAtmInternal.attachApplication(app.getWindowProcessController());
+        } catch (Exception e) {
+            Slog.wtf(TAG, "Exception thrown launching activities in " + app, e);
+            badApp = true;
+        }
+    }
+
+    // Find any services that should be running in this process...
+    if (!badApp) {
+        try {
+            didSomething |= mServices.attachApplicationLocked(app, processName);
+            checkTime(startTime, "attachApplicationLocked: after mServices.attachApplicationLocked");
+        } catch (Exception e) {
+            Slog.wtf(TAG, "Exception thrown starting services in " + app, e);
+            badApp = true;
+        }
+    }
+
+    // Check if a next-broadcast receiver is in this process...
+    if (!badApp && isPendingBroadcastProcessLocked(pid)) {
+        try {
+            didSomething |= sendPendingBroadcastsLocked(app);
+            checkTime(startTime, "attachApplicationLocked: after sendPendingBroadcastsLocked");
+        } catch (Exception e) {
+            // If the app died trying to launch the receiver we declare it 'bad'
+            Slog.wtf(TAG, "Exception thrown dispatching broadcasts in " + app, e);
+            badApp = true;
+        }
+    }
+
+    // Check whether the next backup agent is in this process...
+    if (!badApp && backupTarget != null && backupTarget.app == app) {
+        if (DEBUG_BACKUP) Slog.v(TAG_BACKUP,
+                "New app is backup target, launching agent for " + app);
+        notifyPackageUse(backupTarget.appInfo.packageName,
+                            PackageManager.NOTIFY_PACKAGE_USE_BACKUP);
+        try {
+            thread.scheduleCreateBackupAgent(backupTarget.appInfo,
+                    compatibilityInfoForPackage(backupTarget.appInfo),
+                    backupTarget.backupMode, backupTarget.userId);
+        } catch (Exception e) {
+            Slog.wtf(TAG, "Exception thrown creating backup agent in " + app, e);
+            badApp = true;
+        }
+    }
+
+    if (badApp) {
+        app.kill("error during init", ApplicationExitInfo.REASON_INITIALIZATION_FAILURE, true);
+        handleAppDiedLocked(app, false, true);
+        return false;
+    }
+
+    if (!didSomething) {
+        updateOomAdjLocked(app, OomAdjuster.OOM_ADJ_REASON_PROCESS_BEGIN);
+        checkTime(startTime, "attachApplicationLocked: after updateOomAdjLocked");
+    }
+
+    return true;
+}
+```
+
+这里我们需要注意一下之前在`ProcessList`中调用的`handleProcessStartedLocked`方法
