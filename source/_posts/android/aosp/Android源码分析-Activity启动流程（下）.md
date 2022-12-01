@@ -1013,6 +1013,8 @@ private void attach(boolean system, long startSeq) {
 
 而`attach`方法最重要的一步又是调用了`AMS`的`attachApplication`方法
 
+# AMS.attachApplication
+
 ```java
 public final void attachApplication(IApplicationThread thread, long startSeq) {
     if (thread == null) {
@@ -1164,131 +1166,43 @@ private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
         boolean isRestrictedBackupMode = false;
         ... //备份相关
 
-        final ActiveInstrumentation instr = app.getActiveInstrumentation();
+        final ActiveInstrumentation instr;
+        ... //自动化测试相关
 
-        if (instr != null) {
-            notifyPackageUse(instr.mClass.getPackageName(),
-                                PackageManager.NOTIFY_PACKAGE_USE_INSTRUMENTATION);
-        }
         ApplicationInfo appInfo = instr != null ? instr.mTargetInfo : app.info;
         app.compat = compatibilityInfoForPackage(appInfo);
 
         ProfilerInfo profilerInfo = null;
         String preBindAgent = null;
-        if (mProfileData.getProfileApp() != null
-                && mProfileData.getProfileApp().equals(processName)) {
-            mProfileData.setProfileProc(app);
-            if (mProfileData.getProfilerInfo() != null) {
-                // Send a profiler info object to the app if either a file is given, or
-                // an agent should be loaded at bind-time.
-                boolean needsInfo = mProfileData.getProfilerInfo().profileFile != null
-                        || mProfileData.getProfilerInfo().attachAgentDuringBind;
-                profilerInfo = needsInfo
-                        ? new ProfilerInfo(mProfileData.getProfilerInfo()) : null;
-                if (mProfileData.getProfilerInfo().agent != null) {
-                    preBindAgent = mProfileData.getProfilerInfo().agent;
-                }
-            }
-        } else if (instr != null && instr.mProfileFile != null) {
-            profilerInfo = new ProfilerInfo(instr.mProfileFile, null, 0, false, false,
-                    null, false);
-        }
-        if (mAppAgentMap != null && mAppAgentMap.containsKey(processName)) {
-            // We need to do a debuggable check here. See setAgentApp for why the check is
-            // postponed to here.
-            if ((app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
-                String agent = mAppAgentMap.get(processName);
-                // Do not overwrite already requested agent.
-                if (profilerInfo == null) {
-                    profilerInfo = new ProfilerInfo(null, null, 0, false, false,
-                            mAppAgentMap.get(processName), true);
-                } else if (profilerInfo.agent == null) {
-                    profilerInfo = profilerInfo.setAgent(mAppAgentMap.get(processName), true);
-                }
-            }
-        }
-
-        if (profilerInfo != null && profilerInfo.profileFd != null) {
-            profilerInfo.profileFd = profilerInfo.profileFd.dup();
-            if (TextUtils.equals(mProfileData.getProfileApp(), processName)
-                    && mProfileData.getProfilerInfo() != null) {
-                clearProfilerLocked();
-            }
-        }
+        ... //性能分析相关
 
         // We deprecated Build.SERIAL and it is not accessible to
         // Instant Apps and target APIs higher than O MR1. Since access to the serial
         // is now behind a permission we push down the value.
+        //序列号（Android 8.0后不可再通过Build.SERIAL获取序列号）
         final String buildSerial = (!appInfo.isInstantApp()
                 && appInfo.targetSdkVersion < Build.VERSION_CODES.P)
                         ? sTheRealBuildSerial : Build.UNKNOWN;
 
-        // Check if this is a secondary process that should be incorporated into some
-        // currently active instrumentation.  (Note we do this AFTER all of the profiling
-        // stuff above because profiling can currently happen only in the primary
-        // instrumentation process.)
-        if (mActiveInstrumentation.size() > 0 && instr == null) {
-            for (int i = mActiveInstrumentation.size() - 1;
-                    i >= 0 && app.getActiveInstrumentation() == null; i--) {
-                ActiveInstrumentation aInstr = mActiveInstrumentation.get(i);
-                if (!aInstr.mFinished && aInstr.mTargetInfo.uid == app.uid) {
-                    if (aInstr.mTargetProcesses.length == 0) {
-                        // This is the wildcard mode, where every process brought up for
-                        // the target instrumentation should be included.
-                        if (aInstr.mTargetInfo.packageName.equals(app.info.packageName)) {
-                            app.setActiveInstrumentation(aInstr);
-                            aInstr.mRunningProcesses.add(app);
-                        }
-                    } else {
-                        for (String proc : aInstr.mTargetProcesses) {
-                            if (proc.equals(app.processName)) {
-                                app.setActiveInstrumentation(aInstr);
-                                aInstr.mRunningProcesses.add(app);
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // If we were asked to attach an agent on startup, do so now, before we're binding
-        // application code.
-        if (preBindAgent != null) {
-            thread.attachAgent(preBindAgent);
-        }
+        
+        ... //自动化测试相关
+        ... //性能分析相关
+        
+        //debug模式
         if ((app.info.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
             thread.attachStartupAgents(app.info.dataDir);
         }
 
-        // Figure out whether the app needs to run in autofill compat mode.
-        AutofillOptions autofillOptions = null;
-        if (UserHandle.getAppId(app.info.uid) >= Process.FIRST_APPLICATION_UID) {
-            final AutofillManagerInternal afm = LocalServices.getService(
-                    AutofillManagerInternal.class);
-            if (afm != null) {
-                autofillOptions = afm.getAutofillOptions(
-                        app.info.packageName, app.info.longVersionCode, app.userId);
-            }
-        }
-        ContentCaptureOptions contentCaptureOptions = null;
-        if (UserHandle.getAppId(app.info.uid) >= Process.FIRST_APPLICATION_UID) {
-            final ContentCaptureManagerInternal ccm =
-                    LocalServices.getService(ContentCaptureManagerInternal.class);
-            if (ccm != null) {
-                contentCaptureOptions = ccm.getOptionsForPackage(app.userId,
-                        app.info.packageName);
-            }
-        }
+        ... //自动填充功能（账号密码等）
+        ... //内容捕获相关（ContentCaptureManager）
 
-        checkTime(startTime, "attachApplicationLocked: immediately before bindApplication");
-        bindApplicationTimeMillis = SystemClock.elapsedRealtime();
-        mAtmInternal.preBindApplication(app.getWindowProcessController());
+        //自动化测试
         final ActiveInstrumentation instr2 = app.getActiveInstrumentation();
         if (mPlatformCompat != null) {
             mPlatformCompat.resetReporting(app.info);
         }
         final ProviderInfoList providerList = ProviderInfoList.fromList(providers);
+        //调用ApplicationThread.bindApplication方法
         if (app.isolatedEntryPoint != null) {
             // This is an isolated process which should just call an entry point instead of
             // being bound to an application.
@@ -1317,21 +1231,17 @@ private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
                     buildSerial, autofillOptions, contentCaptureOptions,
                     app.mDisabledCompatChanges);
         }
-        if (profilerInfo != null) {
-            profilerInfo.closeFd();
-            profilerInfo = null;
-        }
+        ...
 
         // Make app active after binding application or client may be running requests (e.g
         // starting activities) before it is ready.
+        //ProcessRecord保存ApplicationThread代理对象
         app.makeActive(thread, mProcessStats);
-        checkTime(startTime, "attachApplicationLocked: immediately after bindApplication");
+        //更新进程使用情况
         mProcessList.updateLruProcessLocked(app, false, null);
-        checkTime(startTime, "attachApplicationLocked: after updateLruProcessLocked");
         app.lastRequestedGc = app.lastLowMemory = SystemClock.uptimeMillis();
     } catch (Exception e) {
-        // We need kill the process group here. (b/148588589)
-        Slog.wtf(TAG, "Exception thrown during bind of " + app, e);
+        //出现错误，杀死进程
         app.resetPackageList(mProcessStats);
         app.unlinkDeathRecipient();
         app.kill("error during bind", ApplicationExitInfo.REASON_INITIALIZATION_FAILURE, true);
@@ -1340,63 +1250,48 @@ private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
     }
 
     // Remove this record from the list of starting applications.
+    //从persistent启动列表中移除此ProcessRecord
+    //persistent是manifest中application标签下的一个属性
+    //设置了此属性代表此App会跟随系统启动而启动
     mPersistentStartingProcesses.remove(app);
-    if (DEBUG_PROCESSES && mProcessesOnHold.contains(app)) Slog.v(TAG_PROCESSES,
-            "Attach application locked removing on hold: " + app);
-    mProcessesOnHold.remove(app);
 
     boolean badApp = false;
     boolean didSomething = false;
 
     // See if the top visible activity is waiting to run in this process...
+    //检查是否有Activity等待启动
     if (normalMode) {
         try {
             didSomething = mAtmInternal.attachApplication(app.getWindowProcessController());
         } catch (Exception e) {
-            Slog.wtf(TAG, "Exception thrown launching activities in " + app, e);
             badApp = true;
         }
     }
 
     // Find any services that should be running in this process...
+    //检查是否有Services等待启动
     if (!badApp) {
         try {
             didSomething |= mServices.attachApplicationLocked(app, processName);
-            checkTime(startTime, "attachApplicationLocked: after mServices.attachApplicationLocked");
         } catch (Exception e) {
-            Slog.wtf(TAG, "Exception thrown starting services in " + app, e);
             badApp = true;
         }
     }
 
     // Check if a next-broadcast receiver is in this process...
+    //检查是否有广播接收器需要启动
     if (!badApp && isPendingBroadcastProcessLocked(pid)) {
         try {
             didSomething |= sendPendingBroadcastsLocked(app);
-            checkTime(startTime, "attachApplicationLocked: after sendPendingBroadcastsLocked");
         } catch (Exception e) {
             // If the app died trying to launch the receiver we declare it 'bad'
-            Slog.wtf(TAG, "Exception thrown dispatching broadcasts in " + app, e);
             badApp = true;
         }
     }
 
-    // Check whether the next backup agent is in this process...
-    if (!badApp && backupTarget != null && backupTarget.app == app) {
-        if (DEBUG_BACKUP) Slog.v(TAG_BACKUP,
-                "New app is backup target, launching agent for " + app);
-        notifyPackageUse(backupTarget.appInfo.packageName,
-                            PackageManager.NOTIFY_PACKAGE_USE_BACKUP);
-        try {
-            thread.scheduleCreateBackupAgent(backupTarget.appInfo,
-                    compatibilityInfoForPackage(backupTarget.appInfo),
-                    backupTarget.backupMode, backupTarget.userId);
-        } catch (Exception e) {
-            Slog.wtf(TAG, "Exception thrown creating backup agent in " + app, e);
-            badApp = true;
-        }
-    }
+    ... //备份相关
 
+    //以上几步发生异常，杀死App进程
     if (badApp) {
         app.kill("error during init", ApplicationExitInfo.REASON_INITIALIZATION_FAILURE, true);
         handleAppDiedLocked(app, false, true);
@@ -1404,12 +1299,586 @@ private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
     }
 
     if (!didSomething) {
+        //更新进程OOM等级
         updateOomAdjLocked(app, OomAdjuster.OOM_ADJ_REASON_PROCESS_BEGIN);
-        checkTime(startTime, "attachApplicationLocked: after updateOomAdjLocked");
     }
 
     return true;
 }
 ```
 
-这里我们需要注意一下之前在`ProcessList`中调用的`handleProcessStartedLocked`方法
+总结一下这个方法主要做了哪些事，首先获取`ProcessRecord`，然后对其做一些初始化设置，然后调用`ApplicaionThread.bindApplication`方法，最后分别检查处理`Activity`、`Service`和`BroadcastReceiver`的启动
+
+## 获取ProcessRecord
+
+我们看一下这个方法是怎么获取`ProcessRecord`的，我们先回顾一下之前在`startProcessLocked`方法的最后，会使用同步或异步的方式启动进程，最终两者都会调用`startProcess`和`handleProcessStartedLocked`方法
+
+### 同步启动进程
+
+我们回顾一下之前讲到的`ActivityManagerInternal.startProcess`方法，可以发现它内部使用了`synchronized (ActivityManagerService.this)`加锁，而`AMS.attachApplication`方法同样也使用了`AMS`实例对象加了锁，所以在同步启动进程的情况下，必然会先执行`handleProcessStartedLocked`方法，再执行`attachApplication`方法，根据之前所分析的，`handleProcessStartedLocked`方法会将`ProcessRecord`存到PidMap中，然后`attachApplication`方法又会从PidMap中去取，此时取出的`ProcessRecord`必然不为`null`
+
+### 异步启动进程
+
+在异步启动进程的情况下，是通过`Handler`将启动进程的工作插入到任务队列中，这个任务的执行是不在锁的作用域范围内的，在这个任务内没有对`startProcess`方法加锁，只对`handleProcessStartedLocked`方法加了锁，所以这里会有两种情况：
+
+- 先执行`handleProcessStartedLocked`方法，再执行`attachApplication`方法
+
+    这种情况和同步启动进程的执行顺序是一样的，`ProcessRecord`获取方式也相同
+
+- 先执行`attachApplication`方法，再执行`handleProcessStartedLocked`方法
+
+    这种情况下，PidMap中取不到相应的`ProcessRecord`，此时`ProcessList.mPendingStarts`中还没有将`ProcessRecord`移除，所以会从`mPendingStarts`这个启动列表中取出`ProcessRecord`，然后再调用`handleProcessStartedLocked`方法，等到`attachApplication`方法走完，锁释放后，在进入到外部的`handleProcessStartedLocked`重载方法，这个方法会先判断`mPendingStarts`中是否还存在对应的`ProcessRecord`，如果不存在，便会直接返回，保证`handleProcessStartedLocked`方法只执行一次
+
+# ApplicationThread.bindApplication
+
+接着，我们继续看重点方法`ApplicationThread.bindApplication`
+
+`ApplicationThread`是`ActivityThread`的一个内部类
+
+```java
+@Override
+public final void bindApplication(String processName, ApplicationInfo appInfo,
+        ProviderInfoList providerList, ComponentName instrumentationName,
+        ProfilerInfo profilerInfo, Bundle instrumentationArgs,
+        IInstrumentationWatcher instrumentationWatcher,
+        IUiAutomationConnection instrumentationUiConnection, int debugMode,
+        boolean enableBinderTracking, boolean trackAllocation,
+        boolean isRestrictedBackupMode, boolean persistent, Configuration config,
+        CompatibilityInfo compatInfo, Map services, Bundle coreSettings,
+        String buildSerial, AutofillOptions autofillOptions,
+        ContentCaptureOptions contentCaptureOptions, long[] disabledCompatChanges) {
+    if (services != null) {
+        // Setup the service cache in the ServiceManager
+        //初始化通用系统服务缓存
+        ServiceManager.initServiceCache(services);
+    }
+
+    setCoreSettings(coreSettings);
+
+    AppBindData data = new AppBindData();
+    data.processName = processName;
+    data.appInfo = appInfo;
+    data.providers = providerList.getList();
+    data.instrumentationName = instrumentationName;
+    data.instrumentationArgs = instrumentationArgs;
+    data.instrumentationWatcher = instrumentationWatcher;
+    data.instrumentationUiAutomationConnection = instrumentationUiConnection;
+    data.debugMode = debugMode;
+    data.enableBinderTracking = enableBinderTracking;
+    data.trackAllocation = trackAllocation;
+    data.restrictedBackupMode = isRestrictedBackupMode;
+    data.persistent = persistent;
+    data.config = config;
+    data.compatInfo = compatInfo;
+    data.initProfilerInfo = profilerInfo;
+    data.buildSerial = buildSerial;
+    data.autofillOptions = autofillOptions;
+    data.contentCaptureOptions = contentCaptureOptions;
+    data.disabledCompatChanges = disabledCompatChanges;
+    sendMessage(H.BIND_APPLICATION, data);
+}
+```
+
+这个方法很简单，只是将参数包装成一个`AppBindData`，然后通过`Handler`发送消息处理，根据消息的类型，最终会调用`ActivityThread.handleBindApplication`方法
+
+```java
+private void handleBindApplication(AppBindData data) {
+    // Register the UI Thread as a sensitive thread to the runtime.
+    //将UI线程注册成JIT敏感线程
+    VMRuntime.registerSensitiveThread();
+
+    ...
+
+    ... //AppCompat相关
+
+    mBoundApplication = data;
+    
+    ... //Configuration相关
+
+    mProfiler = new Profiler();
+    ... //性能分析相关
+
+    // send up app name; do this *before* waiting for debugger
+    //设置进程名
+    Process.setArgV0(data.processName);
+    android.ddm.DdmHandleAppName.setAppName(data.processName,
+                                            data.appInfo.packageName,
+                                            UserHandle.myUserId());
+    VMRuntime.setProcessPackageName(data.appInfo.packageName);
+
+    // Pass data directory path to ART. This is used for caching information and
+    // should be set before any application code is loaded.
+    //设置进程数据目录
+    VMRuntime.setProcessDataDirectory(data.appInfo.dataDir);
+
+    //性能分析相关
+    if (mProfiler.profileFd != null) {
+        mProfiler.startProfiling();
+    }
+
+    // If the app is Honeycomb MR1 or earlier, switch its AsyncTask
+    // implementation to use the pool executor.  Normally, we use the
+    // serialized executor as the default. This has to happen in the
+    // main thread so the main looper is set right.
+    //当App的targetSdkVersion小于等于 3.1 (12) 时，AsyncTask使用线程池实现
+    if (data.appInfo.targetSdkVersion <= android.os.Build.VERSION_CODES.HONEYCOMB_MR1) {
+        AsyncTask.setDefaultExecutor(AsyncTask.THREAD_POOL_EXECUTOR);
+    }
+
+    // Let the util.*Array classes maintain "undefined" for apps targeting Pie or earlier.
+    //当App的targetSdkVersion大于等于 10 (29) 时，针对Android SDK提供的容器（SparseArray等）
+    //如果index越界，会主动抛ArrayIndexOutOfBoundsException异常
+    //（之前数组越界的行为未被定义）
+    UtilConfig.setThrowExceptionForUpperArrayOutOfBounds(
+            data.appInfo.targetSdkVersion >= Build.VERSION_CODES.Q);
+
+    //当App的targetSdkVersion大于等于 5.0 (21) 时，回收正在使用的Message会抛出异常
+    Message.updateCheckRecycle(data.appInfo.targetSdkVersion);
+
+    // Supply the targetSdkVersion to the UI rendering module, which may
+    // need it in cases where it does not have access to the appInfo.
+    //设置App目标版本
+    android.graphics.Compatibility.setTargetSdkVersion(data.appInfo.targetSdkVersion);
+
+    /*
+        * Before spawning a new process, reset the time zone to be the system time zone.
+        * This needs to be done because the system time zone could have changed after the
+        * the spawning of this process. Without doing this this process would have the incorrect
+        * system time zone.
+        */
+    //设置时区
+    TimeZone.setDefault(null);
+
+    /*
+        * Set the LocaleList. This may change once we create the App Context.
+        */
+    LocaleList.setDefault(data.config.getLocales());
+
+    //加载系统字体
+    if (Typeface.ENABLE_LAZY_TYPEFACE_INITIALIZATION) {
+        try {
+            Typeface.setSystemFontMap(data.mSerializedSystemFontMap);
+        } catch (IOException | ErrnoException e) {
+            Typeface.loadPreinstalledSystemFontMap();
+        }
+    }
+
+    //更新Configuration
+    synchronized (mResourcesManager) {
+        /*
+            * Update the system configuration since its preloaded and might not
+            * reflect configuration changes. The configuration object passed
+            * in AppBindData can be safely assumed to be up to date
+            */
+        mResourcesManager.applyConfigurationToResources(data.config, data.compatInfo);
+        mCurDefaultDisplayDpi = data.config.densityDpi;
+
+        // This calls mResourcesManager so keep it within the synchronized block.
+        mConfigurationController.applyCompatConfiguration();
+    }
+
+    final boolean isSdkSandbox = data.sdkSandboxClientAppPackage != null;
+    //获取LoadedApk
+    data.info = getPackageInfoNoCheck(data.appInfo, data.compatInfo, isSdkSandbox);
+    //沙盒模式
+    if (isSdkSandbox) {
+        data.info.setSdkSandboxStorage(data.sdkSandboxClientAppVolumeUuid,
+                data.sdkSandboxClientAppPackage);
+    }
+
+    //性能分析器代理JVM（JVMTI）
+    if (agent != null) {
+        handleAttachAgent(agent, data.info);
+    }
+
+    /**
+        * Switch this process to density compatibility mode if needed.
+        */
+    //在manifest，supports-screens标签中设置了android:anyDensity
+    //详见：https://developer.android.com/guide/topics/manifest/supports-screens-element#any
+    if ((data.appInfo.flags&ApplicationInfo.FLAG_SUPPORTS_SCREEN_DENSITIES)
+            == 0) {
+        //指示App包含用于适应任何屏幕密度的资源
+        mDensityCompatMode = true;
+        Bitmap.setDefaultDensity(DisplayMetrics.DENSITY_DEFAULT);
+    }
+    //设置默认密度
+    mConfigurationController.updateDefaultDensity(data.config.densityDpi);
+
+    /* 设置 12/24 小时时间制 */
+    // mCoreSettings is only updated from the main thread, while this function is only called
+    // from main thread as well, so no need to lock here.
+    final String use24HourSetting = mCoreSettings.getString(Settings.System.TIME_12_24);
+    Boolean is24Hr = null;
+    if (use24HourSetting != null) {
+        is24Hr = "24".equals(use24HourSetting) ? Boolean.TRUE : Boolean.FALSE;
+    }
+    // null : use locale default for 12/24 hour formatting,
+    // false : use 12 hour format,
+    // true : use 24 hour format.
+    DateFormat.set24HourTimePref(is24Hr);
+
+    //更新view debug属性sDebugViewAttributes
+    //设置了这个属性，View将会保存它本身的属性
+    //和Layout Inspector相关
+    updateDebugViewAttributeState();
+
+    //初始化默认线程策略
+    StrictMode.initThreadDefaults(data.appInfo);
+    //初始化默认VM策略
+    StrictMode.initVmDefaults(data.appInfo);
+
+    //debug模式
+    if (data.debugMode != ApplicationThreadConstants.DEBUG_OFF) {
+        // XXX should have option to change the port.
+        Debug.changeDebugPort(8100);
+        if (data.debugMode == ApplicationThreadConstants.DEBUG_WAIT) {
+            Slog.w(TAG, "Application " + data.info.getPackageName()
+                    + " is waiting for the debugger on port 8100...");
+
+            IActivityManager mgr = ActivityManager.getService();
+            try {
+                mgr.showWaitingForDebugger(mAppThread, true);
+            } catch (RemoteException ex) {
+                throw ex.rethrowFromSystemServer();
+            }
+
+            Debug.waitForDebugger();
+
+            try {
+                mgr.showWaitingForDebugger(mAppThread, false);
+            } catch (RemoteException ex) {
+                throw ex.rethrowFromSystemServer();
+            }
+
+        } else {
+            Slog.w(TAG, "Application " + data.info.getPackageName()
+                    + " can be debugged on port 8100...");
+        }
+    }
+
+    // Allow binder tracing, and application-generated systrace messages if we're profileable.
+    //debug模式
+    boolean isAppDebuggable = (data.appInfo.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
+    //性能分析模式
+    boolean isAppProfileable = isAppDebuggable || data.appInfo.isProfileable();
+    //允许应用程序跟踪
+    Trace.setAppTracingAllowed(isAppProfileable);
+    //开启Binder栈追踪
+    if ((isAppProfileable || Build.IS_DEBUGGABLE) && data.enableBinderTracking) {
+        Binder.enableStackTracking();
+    }
+
+    // Initialize heap profiling.
+    //初始化堆分析
+    if (isAppProfileable || Build.IS_DEBUGGABLE) {
+        nInitZygoteChildHeapProfiling();
+    }
+
+    // Allow renderer debugging features if we're debuggable.
+    //开启硬件加速调试功能
+    HardwareRenderer.setDebuggingEnabled(isAppDebuggable || Build.IS_DEBUGGABLE);
+    HardwareRenderer.setPackageName(data.appInfo.packageName);
+
+    // Pass the current context to HardwareRenderer
+    //为硬件加速设置Context
+    HardwareRenderer.setContextForInit(getSystemContext());
+
+    // Instrumentation info affects the class loader, so load it before
+    // setting up the app context.
+    //准备自动化测试信息
+    final InstrumentationInfo ii;
+    if (data.instrumentationName != null) {
+        ii = prepareInstrumentation(data);
+    } else {
+        ii = null;
+    }
+
+    //创建Context
+    final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
+    //更新区域列表
+    mConfigurationController.updateLocaleListFromAppContext(appContext);
+
+    // Initialize the default http proxy in this process.
+    // In pre-boot mode (doing initial launch to collect password), not all system is up.
+    // This includes the connectivity service, so trying to obtain ConnectivityManager at
+    // that point would return null. Check whether the ConnectivityService is available, and
+    // avoid crashing with a NullPointerException if it is not.
+    //设置默认HTTP代理
+    final IBinder b = ServiceManager.getService(Context.CONNECTIVITY_SERVICE);
+    if (b != null) {
+        final ConnectivityManager cm =
+                appContext.getSystemService(ConnectivityManager.class);
+        Proxy.setHttpProxyConfiguration(cm.getDefaultProxy());
+    }
+
+    if (!Process.isIsolated()) {
+        final int oldMask = StrictMode.allowThreadDiskWritesMask();
+        try {
+            setupGraphicsSupport(appContext);
+        } finally {
+            StrictMode.setThreadPolicyMask(oldMask);
+        }
+    } else {
+        HardwareRenderer.setIsolatedProcess(true);
+    }
+
+    // Install the Network Security Config Provider. This must happen before the application
+    // code is loaded to prevent issues with instances of TLS objects being created before
+    // the provider is installed.
+    //网络安全设置
+    NetworkSecurityConfigProvider.install(appContext);
+
+    // For backward compatibility, TrafficStats needs static access to the application context.
+    // But for isolated apps which cannot access network related services, service discovery
+    // is restricted. Hence, calling this would result in NPE.
+    //初始化流量统计工具
+    if (!Process.isIsolated()) {
+        TrafficStats.init(appContext);
+    }
+
+    // Continue loading instrumentation.
+    if (ii != null) {
+        //如果设置了自动化测试，实例化指定的自动化测试类
+        initInstrumentation(ii, data, appContext);
+    } else {
+        //直接实例化Instrumentation
+        mInstrumentation = new Instrumentation();
+        mInstrumentation.basicInit(this);
+    }
+
+    //调整应用可用内存上限
+    if ((data.appInfo.flags&ApplicationInfo.FLAG_LARGE_HEAP) != 0) {
+        dalvik.system.VMRuntime.getRuntime().clearGrowthLimit();
+    } else {
+        // Small heap, clamp to the current growth limit and let the heap release
+        // pages after the growth limit to the non growth limit capacity. b/18387825
+        dalvik.system.VMRuntime.getRuntime().clampGrowthLimit();
+    }
+
+    // Allow disk access during application and provider setup. This could
+    // block processing ordered broadcasts, but later processing would
+    // probably end up doing the same disk access.
+    Application app;
+    final StrictMode.ThreadPolicy savedPolicy = StrictMode.allowThreadDiskWrites();
+    final StrictMode.ThreadPolicy writesAllowedPolicy = StrictMode.getThreadPolicy();
+    try {
+        // If the app is being launched for full backup or restore, bring it up in
+        // a restricted environment with the base application class.
+        //创建Application
+        app = data.info.makeApplicationInner(data.restrictedBackupMode, null);
+
+        // Propagate autofill compat state
+        //设置自动填充功能
+        app.setAutofillOptions(data.autofillOptions);
+
+        // Propagate Content Capture options
+        //设置内容捕获功能
+        app.setContentCaptureOptions(data.contentCaptureOptions);
+        sendMessage(H.SET_CONTENT_CAPTURE_OPTIONS_CALLBACK, data.appInfo.packageName);
+
+        mInitialApplication = app;
+        //更新HTTP代理
+        final boolean updateHttpProxy;
+        synchronized (this) {
+            updateHttpProxy = mUpdateHttpProxyOnBind;
+            // This synchronized block ensures that any subsequent call to updateHttpProxy()
+            // will see a non-null mInitialApplication.
+        }
+        if (updateHttpProxy) {
+            ActivityThread.updateHttpProxy(app);
+        }
+
+        // don't bring up providers in restricted mode; they may depend on the
+        // app's custom Application class
+        //在非受限模式下启动ContentProvider
+        if (!data.restrictedBackupMode) {
+            if (!ArrayUtils.isEmpty(data.providers)) {
+                installContentProviders(app, data.providers);
+            }
+        }
+
+        // Do this after providers, since instrumentation tests generally start their
+        // test thread at this point, and we don't want that racing.
+        //执行onCreate方法（默认Instrumentation实现为空方法）
+        mInstrumentation.onCreate(data.instrumentationArgs);
+        //执行Application的onCreate方法
+        mInstrumentation.callApplicationOnCreate(app);
+    } finally {
+        // If the app targets < O-MR1, or doesn't change the thread policy
+        // during startup, clobber the policy to maintain behavior of b/36951662
+        if (data.appInfo.targetSdkVersion < Build.VERSION_CODES.O_MR1
+                || StrictMode.getThreadPolicy().equals(writesAllowedPolicy)) {
+            StrictMode.setThreadPolicy(savedPolicy);
+        }
+    }
+
+    // Preload fonts resources
+    //预加载字体资源
+    FontsContract.setApplicationContextForResources(appContext);
+    if (!Process.isIsolated()) {
+        try {
+            final ApplicationInfo info =
+                    getPackageManager().getApplicationInfo(
+                            data.appInfo.packageName,
+                            PackageManager.GET_META_DATA /*flags*/,
+                            UserHandle.myUserId());
+            if (info.metaData != null) {
+                final int preloadedFontsResource = info.metaData.getInt(
+                        ApplicationInfo.METADATA_PRELOADED_FONTS, 0);
+                if (preloadedFontsResource != 0) {
+                    data.info.getResources().preloadFonts(preloadedFontsResource);
+                }
+            }
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+}
+```
+
+这个方法很重要，我们先过一下几个重点部分，然后再按着主线继续往下研究：
+
+- `Debug`、`Profiler`、`Layout Inspector`
+
+  `Android`应用开发的同学对这三样肯定不陌生，在`Android Studio`中我们可以对App进行调试，性能分析和布局检查，在这个方法中，我们可以找到与这三样相关的一些代码
+
+- 获取`LoadedApk`
+
+  `LoadedApk`是`Apk`文件在内存中的表示，包含了`Apk`文件中的代码、资源、组件、`manifest`等信息
+
+- 创建`Context`
+
+  这里通过`ActivityThread`和`LoadedApk`创建出了一个`ContextImpl`
+
+- 实例化`Instrumentation`
+
+  这里和自动化测试相关，如果设置了自动化测试，实例化指定的自动化测试类，否则实例化默认的`Instrumentation`
+
+- 创建`Application`
+
+  这里根据`LoadedApk`创建出相应的`Application`，需要注意，这里创建的`Application`并不与上面创建出的`ContextImpl`绑定，而是在创建`Application`的过程中，以同样的参数重新创建了一个`ContextImpl`，然后调用`attachBaseContext`方法绑定它
+
+- 设置`HTTP`代理
+
+  App在启动过程中设置`HTTP`代理，所以我们在开发过程中使用代理抓包等时候需要注意，设置了代理后需要重启App才会生效
+
+- 启动`ContentProvider`
+
+  `ContentProvider`的启动过程以后会新开文章进行分析，这里只需要知道`ContentProvider`启动的入口在这就行了
+
+- 执行`Application`的`onCreate`方法
+
+  当创建完`Application`，执行`attachBaseContext`方法后，便会调用`onCreate`方法
+
+我们拣重点来看，首先是`Application`的创建过程
+
+在上文的方法中，调用了`data.info.makeApplicationInner`方法创建`Application`，其中`data.info`为`LoadedApk`类型
+
+```java
+public Application makeApplicationInner(boolean forceDefaultAppClass,
+        Instrumentation instrumentation) {
+    return makeApplicationInner(forceDefaultAppClass, instrumentation,
+            /* allowDuplicateInstances= */ false);
+}
+
+private Application makeApplicationInner(boolean forceDefaultAppClass,
+        Instrumentation instrumentation, boolean allowDuplicateInstances) {
+    //如果之前创建过了就可以直接返回
+    if (mApplication != null) {
+        return mApplication;
+    };
+
+    //从缓存中获取Application（多个App可以运行在同一个进程中）
+    synchronized (sApplications) {
+        final Application cached = sApplications.get(mPackageName);
+        if (cached != null) {
+            // Looks like this is always happening for the system server, because
+            // the LoadedApk created in systemMain() -> attach() isn't cached properly?
+            if (!"android".equals(mPackageName)) {
+                Slog.wtfStack(TAG, "App instance already created for package=" + mPackageName
+                        + " instance=" + cached);
+            }
+            if (!allowDuplicateInstances) {
+                mApplication = cached;
+                return cached;
+            }
+            // Some apps intentionally call makeApplication() to create a new Application
+            // instance... Sigh...
+        }
+    }
+
+    Application app = null;
+
+    final String myProcessName = Process.myProcessName();
+    //获取Application类名（App可以自定义Application这个应该所有开发都知道吧）
+    //对应AndroidManifest中application标签下的android:name属性
+    String appClass = mApplicationInfo.getCustomApplicationClassNameForProcess(
+            myProcessName);
+    //没有设置自定义Application或强制使用默认Application的情况下，使用默认Application
+    if (forceDefaultAppClass || (appClass == null)) {
+        appClass = "android.app.Application";
+    }
+
+    try {
+        //初始化ContextClassLoader
+        final java.lang.ClassLoader cl = getClassLoader();
+        if (!mPackageName.equals("android")) {
+            initializeJavaContextClassLoader();
+        }
+
+        //Android共享库资源ID动态映射
+        // Rewrite the R 'constants' for all library apks.
+        SparseArray<String> packageIdentifiers = getAssets().getAssignedPackageIdentifiers(
+                false, false);
+        for (int i = 0, n = packageIdentifiers.size(); i < n; i++) {
+            final int id = packageIdentifiers.keyAt(i);
+            if (id == 0x01 || id == 0x7f) {
+                continue;
+            }
+
+            rewriteRValues(cl, packageIdentifiers.valueAt(i), id);
+        }
+
+        //创建BaseContext
+        ContextImpl appContext = ContextImpl.createAppContext(mActivityThread, this);
+        // The network security config needs to be aware of multiple
+        // applications in the same process to handle discrepancies
+        //网络安全设置
+        NetworkSecurityConfigProvider.handleNewApplication(appContext);
+        //创建Application
+        app = mActivityThread.mInstrumentation.newApplication(
+                cl, appClass, appContext);
+        appContext.setOuterContext(app);
+    } catch (Exception e) {
+        if (!mActivityThread.mInstrumentation.onException(app, e)) {
+            throw new RuntimeException(
+                "Unable to instantiate application " + appClass
+                + " package " + mPackageName + ": " + e.toString(), e);
+        }
+    }
+    //将App的Application添加到缓存中（多个App可以运行在同一个进程中）
+    mActivityThread.mAllApplications.add(app);
+    mApplication = app;
+    if (!allowDuplicateInstances) {
+        synchronized (sApplications) {
+            sApplications.put(mPackageName, app);
+        }
+    }
+
+    if (instrumentation != null) {
+        try {
+            //调用Application的OnCreate方法
+            instrumentation.callApplicationOnCreate(app);
+        } catch (Exception e) {
+            if (!instrumentation.onException(app, e)) {
+                throw new RuntimeException(
+                    "Unable to create application " + app.getClass().getName()
+                    + ": " + e.toString(), e);
+            }
+        }
+    }
+
+    return app;
+}
+```
