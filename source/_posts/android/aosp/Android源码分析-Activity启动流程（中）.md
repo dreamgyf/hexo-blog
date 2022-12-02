@@ -15,13 +15,13 @@ categories:
 
 **本篇以android-11.0.0_r25作为基础解析**
 
-上一篇文章 [Android源码分析 - Activity启动流程（上）](https://juejin.cn/post/7130182223231188999) 中，我们分析了`Activity`启动流程中的一小部分，基本上可以算是`Activity`启动的前置准备工作，这篇文章我们将会分析`Activity`启动的主要流程
+上一篇文章 [Android源码分析 - Activity启动流程（上）](https://juejin.cn/post/7130182223231188999) 中，我们分析了`Activity`启动流程中的一小部分，基本上可以算是`Activity`启动的前置准备工作，这篇文章我们将会分析App进程启动的主要流程
 
 # 启动App进程
 
 ## 准备ProcessRecord
 
-我们从App进程的启动开始说起，上篇文章中我们说过了，如果App尚未启动，则会调用`ATMS`的`startProcessAsync`方法去启动App进程
+上篇文章中我们说过了，如果App尚未启动，则会调用`ATMS`的`startProcessAsync`方法去启动App进程
 
 ```java
 void startProcessAsync(ActivityRecord activity, boolean knownToBeDead, boolean isTop,
