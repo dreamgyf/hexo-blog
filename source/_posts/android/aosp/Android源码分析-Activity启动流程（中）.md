@@ -1,5 +1,5 @@
 ---
-title: Android源码分析 - Activity启动流程（下）
+title: Android源码分析 - Activity启动流程（中）
 date: 2022-10-24 14:49:22
 tags: 
 - Android源码
@@ -741,7 +741,7 @@ private ZygoteState openZygoteSocketIfNeeded(String abi) throws ZygoteStartFaile
 
 我们之前在 [Android源码分析 - Zygote进程](https://juejin.cn/post/7051507161955827720) 中说过，一般，64位的cpu会启动两个`zygoto`进程，一个64位（主`zygote`），一个32位（辅`zygote`）
 
-![zygote]()
+![zygote](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90-Activity%E5%90%AF%E5%8A%A8%E6%B5%81%E7%A8%8B%EF%BC%88%E4%B8%AD%EF%BC%89_zygote.png)
 
 接下来我们看`zygoteSendArgsAndGetResult`方法
 
@@ -1773,6 +1773,8 @@ private void handleBindApplication(AppBindData data) {
 
 我们拣重点来看，首先是`Application`的创建过程
 
+## LoadedApk.makeApplicationInner
+
 在上文的方法中，调用了`data.info.makeApplicationInner`方法创建`Application`，其中`data.info`为`LoadedApk`类型
 
 ```java
@@ -1827,8 +1829,8 @@ private Application makeApplicationInner(boolean forceDefaultAppClass,
             initializeJavaContextClassLoader();
         }
 
-        //Android共享库资源ID动态映射
         // Rewrite the R 'constants' for all library apks.
+        //Android共享库资源ID动态映射
         SparseArray<String> packageIdentifiers = getAssets().getAssignedPackageIdentifiers(
                 false, false);
         for (int i = 0, n = packageIdentifiers.size(); i < n; i++) {
@@ -1840,7 +1842,7 @@ private Application makeApplicationInner(boolean forceDefaultAppClass,
             rewriteRValues(cl, packageIdentifiers.valueAt(i), id);
         }
 
-        //创建BaseContext
+        //创建Context
         ContextImpl appContext = ContextImpl.createAppContext(mActivityThread, this);
         // The network security config needs to be aware of multiple
         // applications in the same process to handle discrepancies
@@ -1866,6 +1868,7 @@ private Application makeApplicationInner(boolean forceDefaultAppClass,
         }
     }
 
+    //根据入参不会进入此case
     if (instrumentation != null) {
         try {
             //调用Application的OnCreate方法
@@ -1882,3 +1885,110 @@ private Application makeApplicationInner(boolean forceDefaultAppClass,
     return app;
 }
 ```
+
+这个方法首先从缓存中尝试获取已创建过的`Application`，先尝试取成员变量`mApplication`，再尝试从静态变量`sApplications`中取，一开始我还没想通为什么还需要一个`sApplications`，后来想起来，多个App是可以在同一个进程中运行的
+
+然后再去获取`Application`类名，默认为`android.app.Application`，开发可以通过设置`AndroidManifest`中`application`标签下的`android:name`属性来选择创建自定义的`Application`
+
+然后对共享库资源ID做动态映射，关于这部分感兴趣的同学可以去搜索`Android Dynamic Reference`
+
+接着创建出`ContextImpl`作为`Application`的`BaseContext`，`Application`继承自`ContextWrapper`，而`ContextWrapper`又继承自`Context`，`ContextWrapper`是对`Context`的包装，里面有一个`mBase`成员变量，调用任何方法实际上都是调用`mBase`这个实例的方法，在`Application`创建后会调用`attachBaseContext`将刚刚创建出来的`ContextImpl`赋值给`mBase`成员变量，所以调用`Application`中的任何`Context`方法，实际上最终都是调用`ContextImpl`的方法
+
+然后创建`Application`，并将其设置成`ContextImpl`的`OuterContext`
+
+最后将创建好的`Application`放入缓存中，返回
+
+### ContextImpl.createAppContext
+
+我们简单看一下`ContextImpl`的创建，对于不同的组件，创建`ContextImpl`对象的方法不同，比如说`Activity`的`Context`是通过`createActivityContext`方法创建的，我们这里是通过`createAppContext`创建`Application`的`Context`的
+
+```java
+@UnsupportedAppUsage
+static ContextImpl createAppContext(ActivityThread mainThread, LoadedApk packageInfo) {
+    return createAppContext(mainThread, packageInfo, null);
+}
+
+static ContextImpl createAppContext(ActivityThread mainThread, LoadedApk packageInfo,
+        String opPackageName) {
+    if (packageInfo == null) throw new IllegalArgumentException("packageInfo");
+    ContextImpl context = new ContextImpl(null, mainThread, packageInfo, null, null, null, null,
+            0, null, opPackageName);
+    context.setResources(packageInfo.getResources());
+    //检查android.permission.STATUS_BAR_SERVICE权限
+    context.mIsSystemOrSystemUiContext = isSystemOrSystemUI(context);
+    return context;
+}
+```
+
+简单看看就好，我们的重点不在这里，这个方法实例化了一个`ContextImpl`对象，然后通过`ResourcesManager`获得`Apk`的`Resource`，将其设置到`ContextImpl`中
+
+### Instrumentation.newApplication
+
+接着我们来看一下`Application`是怎么创建的
+
+```java
+public Application newApplication(ClassLoader cl, String className, Context context)
+        throws InstantiationException, IllegalAccessException, 
+        ClassNotFoundException {
+    Application app = getFactory(context.getPackageName())
+            .instantiateApplication(cl, className);
+    app.attach(context);
+    return app;
+}
+```
+
+这里，`getFactory`方法返回的是一个`AppComponentFactory`对象，这个类是在`Android 9`之后加入的，它包括一个实例化`ClassLoader`的方法，一个实例化`Application`的方法和四个实例化四大组件的方法
+
+我们可以在`AndroidManifest`中设置`application`标签的`android:appComponentFactory`属性，将其设置成我们自定义的`AppComponentFactory`，从而进行一些监控或别的操作
+
+我们看一下`AppComponentFactory`的默认实现是怎样的
+
+```java
+public @NonNull Application instantiateApplication(@NonNull ClassLoader cl,
+        @NonNull String className)
+        throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+    return (Application) cl.loadClass(className).newInstance();
+}
+```
+
+可以看到非常简单，就是通过`className`反射实例化出一个`Application`
+
+接着我们回到`newApplication`方法中，我们对新创建的`Application`调用了`attach`方法去绑定`ContextImpl`
+
+```java
+/* package */ final void attach(Context context) {
+    attachBaseContext(context);
+    mLoadedApk = ContextImpl.getImpl(context).mPackageInfo;
+}
+```
+
+这里的`attachBaseContext`调用的是父类`ContextWrapper`中的方法
+
+```java
+protected void attachBaseContext(Context base) {
+    if (mBase != null) {
+        throw new IllegalStateException("Base context already set");
+    }
+    mBase = base;
+}
+```
+
+可以看到，就是将`ContextImpl`赋值给`ContextWrapper`中的`mBase`赋值，这样后面对`Application`调用`Context`的方法，实际上就是代理给这个`mBase`去执行了
+
+到这一步位置，`Application`就创建完成了，接下来在`ActivityThread.handleBindApplication`方法中，还有一步重要操作，就是调用`Application`的`onCreate`方法
+
+这里是借助了`Instrumentation.callApplicationOnCreate`方法
+
+```java
+public void callApplicationOnCreate(Application app) {
+    app.onCreate();
+}
+```
+
+就是简简单单直接调用了`Application`的`onCreate`方法
+
+# 结束
+
+到这里为止，整个`Application`的工作都做完了，接下来还剩检查并启动`Activity`、`Service`和`BroadcastReceiver`，这些内容就放到下一篇再讲吧
+
+话说回来有点惭愧，这篇文章距离上一篇间隔了三个月，最近在忙一些别的项目，这篇文章断断续续写了一个多月才憋出来，感谢大家的支持，在这里我厚着脸皮**求点赞求收藏**，大家的支持就是我创作的动力
