@@ -138,6 +138,42 @@ for (ResolveInfo resolveInfo : matches) {           
 ```
 ---
 
+# 软键盘
+
+1. 弹起软键盘
+
+网上大部分文章所写的弹起软键盘的方法并不完美，大部分文章让你在`onResume`时再弹起，有的文章甚至让你`postDelayed`，非常不靠谱，经过本人分析，软键盘的弹起需要满足以下几个条件：
+
+- 控件为`EditText`或其子类
+
+- 控件所在的`window`要获得焦点
+
+- 控件本身要获得焦点
+
+根据以上几个条件，我写了一个完美弹起软键盘的方法，`onCreate`时也可以照常使用：
+
+```kotlin
+fun View.showKeyboard() {
+    val ims = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager ?: return
+    if (hasWindowFocus()) {
+        requestFocus()
+        ims.showSoftInput(this, 0)
+    } else {
+        viewTreeObserver.addOnWindowFocusChangeListener(object : OnWindowFocusChangeListener {
+            override fun onWindowFocusChanged(hasFocus: Boolean) {
+                if (hasFocus) {
+                    viewTreeObserver.removeOnWindowFocusChangeListener(this)
+                    requestFocus()
+                    ims.showSoftInput(this@showKeyboard, 0)
+                }
+            }
+        })
+    }
+}
+```
+
+---
+
 # 实体键盘
 
 1. `EditText`有焦点时会拦截键盘的数字键
