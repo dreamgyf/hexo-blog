@@ -1336,7 +1336,6 @@ private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
 `ApplicationThread`是`ActivityThread`的一个内部类
 
 ```java
-@Override
 public final void bindApplication(String processName, ApplicationInfo appInfo,
         ProviderInfoList providerList, ComponentName instrumentationName,
         ProfilerInfo profilerInfo, Bundle instrumentationArgs,
@@ -1348,6 +1347,7 @@ public final void bindApplication(String processName, ApplicationInfo appInfo,
         String buildSerial, AutofillOptions autofillOptions,
         ContentCaptureOptions contentCaptureOptions, long[] disabledCompatChanges) {
     if (services != null) {
+        ...
         // Setup the service cache in the ServiceManager
         //初始化通用系统服务缓存
         ServiceManager.initServiceCache(services);
@@ -1386,14 +1386,8 @@ private void handleBindApplication(AppBindData data) {
     // Register the UI Thread as a sensitive thread to the runtime.
     //将UI线程注册成JIT敏感线程
     VMRuntime.registerSensitiveThread();
-
-    ...
-
-    ... //AppCompat相关
-
-    mBoundApplication = data;
     
-    ... //Configuration相关
+    ...
 
     mProfiler = new Profiler();
     ... //性能分析相关
@@ -1435,56 +1429,43 @@ private void handleBindApplication(AppBindData data) {
     //当App的targetSdkVersion大于等于 5.0 (21) 时，回收正在使用的Message会抛出异常
     Message.updateCheckRecycle(data.appInfo.targetSdkVersion);
 
-    // Supply the targetSdkVersion to the UI rendering module, which may
-    // need it in cases where it does not have access to the appInfo.
-    //设置App目标版本
-    android.graphics.Compatibility.setTargetSdkVersion(data.appInfo.targetSdkVersion);
+    // Prior to P, internal calls to decode Bitmaps used BitmapFactory,
+    // which may scale up to account for density. In P, we switched to
+    // ImageDecoder, which skips the upscale to save memory. ImageDecoder
+    // needs to still scale up in older apps, in case they rely on the
+    // size of the Bitmap without considering its density.
+    ImageDecoder.sApiLevel = data.appInfo.targetSdkVersion;
 
     /*
-        * Before spawning a new process, reset the time zone to be the system time zone.
-        * This needs to be done because the system time zone could have changed after the
-        * the spawning of this process. Without doing this this process would have the incorrect
-        * system time zone.
-        */
+    * Before spawning a new process, reset the time zone to be the system time zone.
+    * This needs to be done because the system time zone could have changed after the
+    * the spawning of this process. Without doing this this process would have the incorrect
+    * system time zone.
+    */
     //设置时区
     TimeZone.setDefault(null);
 
     /*
-        * Set the LocaleList. This may change once we create the App Context.
-        */
+    * Set the LocaleList. This may change once we create the App Context.
+    */
     LocaleList.setDefault(data.config.getLocales());
-
-    //加载系统字体
-    if (Typeface.ENABLE_LAZY_TYPEFACE_INITIALIZATION) {
-        try {
-            Typeface.setSystemFontMap(data.mSerializedSystemFontMap);
-        } catch (IOException | ErrnoException e) {
-            Typeface.loadPreinstalledSystemFontMap();
-        }
-    }
 
     //更新Configuration
     synchronized (mResourcesManager) {
         /*
-            * Update the system configuration since its preloaded and might not
-            * reflect configuration changes. The configuration object passed
-            * in AppBindData can be safely assumed to be up to date
-            */
-        mResourcesManager.applyConfigurationToResources(data.config, data.compatInfo);
+        * Update the system configuration since its preloaded and might not
+        * reflect configuration changes. The configuration object passed
+        * in AppBindData can be safely assumed to be up to date
+        */
+        mResourcesManager.applyConfigurationToResourcesLocked(data.config, data.compatInfo);
         mCurDefaultDisplayDpi = data.config.densityDpi;
 
         // This calls mResourcesManager so keep it within the synchronized block.
-        mConfigurationController.applyCompatConfiguration();
+        applyCompatConfiguration(mCurDefaultDisplayDpi);
     }
 
-    final boolean isSdkSandbox = data.sdkSandboxClientAppPackage != null;
     //获取LoadedApk
-    data.info = getPackageInfoNoCheck(data.appInfo, data.compatInfo, isSdkSandbox);
-    //沙盒模式
-    if (isSdkSandbox) {
-        data.info.setSdkSandboxStorage(data.sdkSandboxClientAppVolumeUuid,
-                data.sdkSandboxClientAppPackage);
-    }
+    data.info = getPackageInfoNoCheck(data.appInfo, data.compatInfo);
 
     //性能分析器代理JVM（JVMTI）
     if (agent != null) {
@@ -1492,8 +1473,8 @@ private void handleBindApplication(AppBindData data) {
     }
 
     /**
-        * Switch this process to density compatibility mode if needed.
-        */
+    * Switch this process to density compatibility mode if needed.
+    */
     //在manifest，supports-screens标签中设置了android:anyDensity
     //详见：https://developer.android.com/guide/topics/manifest/supports-screens-element#any
     if ((data.appInfo.flags&ApplicationInfo.FLAG_SUPPORTS_SCREEN_DENSITIES)
@@ -1503,11 +1484,9 @@ private void handleBindApplication(AppBindData data) {
         Bitmap.setDefaultDensity(DisplayMetrics.DENSITY_DEFAULT);
     }
     //设置默认密度
-    mConfigurationController.updateDefaultDensity(data.config.densityDpi);
+    updateDefaultDensity();
 
     /* 设置 12/24 小时时间制 */
-    // mCoreSettings is only updated from the main thread, while this function is only called
-    // from main thread as well, so no need to lock here.
     final String use24HourSetting = mCoreSettings.getString(Settings.System.TIME_12_24);
     Boolean is24Hr = null;
     if (use24HourSetting != null) {
@@ -1558,15 +1537,12 @@ private void handleBindApplication(AppBindData data) {
     }
 
     // Allow binder tracing, and application-generated systrace messages if we're profileable.
-    //debug模式
-    boolean isAppDebuggable = (data.appInfo.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
     //性能分析模式
-    boolean isAppProfileable = isAppDebuggable || data.appInfo.isProfileable();
+    boolean isAppProfileable = data.appInfo.isProfileableByShell();
     //允许应用程序跟踪
     Trace.setAppTracingAllowed(isAppProfileable);
-    //开启Binder栈追踪
     if ((isAppProfileable || Build.IS_DEBUGGABLE) && data.enableBinderTracking) {
-        Binder.enableStackTracking();
+        Binder.enableTracing();
     }
 
     // Initialize heap profiling.
@@ -1576,20 +1552,53 @@ private void handleBindApplication(AppBindData data) {
     }
 
     // Allow renderer debugging features if we're debuggable.
+    boolean isAppDebuggable = (data.appInfo.flags & ApplicationInfo.FLAG_DEBUGGABLE) != 0;
     //开启硬件加速调试功能
     HardwareRenderer.setDebuggingEnabled(isAppDebuggable || Build.IS_DEBUGGABLE);
     HardwareRenderer.setPackageName(data.appInfo.packageName);
 
-    // Pass the current context to HardwareRenderer
-    //为硬件加速设置Context
-    HardwareRenderer.setContextForInit(getSystemContext());
+    /**
+    * Initialize the default http proxy in this process for the reasons we set the time zone.
+    */
+    //设置默认HTTP代理
+    final IBinder b = ServiceManager.getService(Context.CONNECTIVITY_SERVICE);
+    if (b != null) {
+        // In pre-boot mode (doing initial launch to collect password), not
+        // all system is up.  This includes the connectivity service, so don't
+        // crash if we can't get it.
+        final IConnectivityManager service = IConnectivityManager.Stub.asInterface(b);
+        try {
+            Proxy.setHttpProxySystemProperty(service.getProxyForNetwork(null));
+        } catch (RemoteException e) {
+            Trace.traceEnd(Trace.TRACE_TAG_ACTIVITY_MANAGER);
+            throw e.rethrowFromSystemServer();
+        }
+    }
 
     // Instrumentation info affects the class loader, so load it before
     // setting up the app context.
     //准备自动化测试信息
     final InstrumentationInfo ii;
     if (data.instrumentationName != null) {
-        ii = prepareInstrumentation(data);
+        try {
+            ii = new ApplicationPackageManager(
+                    null, getPackageManager(), getPermissionManager())
+                    .getInstrumentationInfo(data.instrumentationName, 0);
+        } catch (PackageManager.NameNotFoundException e) {
+            throw new RuntimeException(
+                    "Unable to find instrumentation info for: " + data.instrumentationName);
+        }
+
+        // Warn of potential ABI mismatches.
+        ...
+
+        mInstrumentationPackageName = ii.packageName;
+        mInstrumentationAppDir = ii.sourceDir;
+        mInstrumentationSplitAppDirs = ii.splitSourceDirs;
+        mInstrumentationLibDir = getInstrumentationLibrary(data.appInfo, ii);
+        mInstrumentedAppDir = data.info.getAppDir();
+        mInstrumentedSplitAppDirs = data.info.getSplitAppDirs();
+        mInstrumentedLibDir = data.info.getLibDir();
     } else {
         ii = null;
     }
@@ -1597,20 +1606,8 @@ private void handleBindApplication(AppBindData data) {
     //创建Context
     final ContextImpl appContext = ContextImpl.createAppContext(this, data.info);
     //更新区域列表
-    mConfigurationController.updateLocaleListFromAppContext(appContext);
-
-    // Initialize the default http proxy in this process.
-    // In pre-boot mode (doing initial launch to collect password), not all system is up.
-    // This includes the connectivity service, so trying to obtain ConnectivityManager at
-    // that point would return null. Check whether the ConnectivityService is available, and
-    // avoid crashing with a NullPointerException if it is not.
-    //设置默认HTTP代理
-    final IBinder b = ServiceManager.getService(Context.CONNECTIVITY_SERVICE);
-    if (b != null) {
-        final ConnectivityManager cm =
-                appContext.getSystemService(ConnectivityManager.class);
-        Proxy.setHttpProxyConfiguration(cm.getDefaultProxy());
-    }
+    updateLocaleListFromAppContext(appContext,
+            mResourcesManager.getConfiguration().getLocales());
 
     if (!Process.isIsolated()) {
         final int oldMask = StrictMode.allowThreadDiskWritesMask();
@@ -1629,20 +1626,51 @@ private void handleBindApplication(AppBindData data) {
     //网络安全设置
     NetworkSecurityConfigProvider.install(appContext);
 
-    // For backward compatibility, TrafficStats needs static access to the application context.
-    // But for isolated apps which cannot access network related services, service discovery
-    // is restricted. Hence, calling this would result in NPE.
-    //初始化流量统计工具
-    if (!Process.isIsolated()) {
-        TrafficStats.init(appContext);
-    }
-
     // Continue loading instrumentation.
-    if (ii != null) {
-        //如果设置了自动化测试，实例化指定的自动化测试类
-        initInstrumentation(ii, data, appContext);
-    } else {
-        //直接实例化Instrumentation
+    if (ii != null) { //如果设置了自动化测试，实例化指定的自动化测试类
+        ApplicationInfo instrApp;
+        try {
+            instrApp = getPackageManager().getApplicationInfo(ii.packageName, 0,
+                    UserHandle.myUserId());
+        } catch (RemoteException e) {
+            instrApp = null;
+        }
+        if (instrApp == null) {
+            instrApp = new ApplicationInfo();
+        }
+        ii.copyTo(instrApp);
+        instrApp.initForUser(UserHandle.myUserId());
+        final LoadedApk pi = getPackageInfo(instrApp, data.compatInfo,
+                appContext.getClassLoader(), false, true, false);
+
+        // The test context's op package name == the target app's op package name, because
+        // the app ops manager checks the op package name against the real calling UID,
+        // which is what the target package name is associated with.
+        final ContextImpl instrContext = ContextImpl.createAppContext(this, pi,
+                appContext.getOpPackageName());
+
+        try {
+            final ClassLoader cl = instrContext.getClassLoader();
+            mInstrumentation = (Instrumentation)
+                cl.loadClass(data.instrumentationName.getClassName()).newInstance();
+        } catch (Exception e) {
+            throw new RuntimeException(
+                "Unable to instantiate instrumentation "
+                + data.instrumentationName + ": " + e.toString(), e);
+        }
+
+        final ComponentName component = new ComponentName(ii.packageName, ii.name);
+        mInstrumentation.init(this, instrContext, appContext, component,
+                data.instrumentationWatcher, data.instrumentationUiAutomationConnection);
+
+        if (mProfiler.profileFile != null && !ii.handleProfiling
+                && mProfiler.profileFd == null) {
+            mProfiler.handlingProfiling = true;
+            final File file = new File(mProfiler.profileFile);
+            file.getParentFile().mkdirs();
+            Debug.startMethodTracing(file.toString(), 8 * 1024 * 1024);
+        }
+    } else { //直接实例化Instrumentation
         mInstrumentation = new Instrumentation();
         mInstrumentation.basicInit(this);
     }
@@ -1666,7 +1694,7 @@ private void handleBindApplication(AppBindData data) {
         // If the app is being launched for full backup or restore, bring it up in
         // a restricted environment with the base application class.
         //创建Application
-        app = data.info.makeApplicationInner(data.restrictedBackupMode, null);
+        app = data.info.makeApplication(data.restrictedBackupMode, null);
 
         // Propagate autofill compat state
         //设置自动填充功能
@@ -1675,19 +1703,8 @@ private void handleBindApplication(AppBindData data) {
         // Propagate Content Capture options
         //设置内容捕获功能
         app.setContentCaptureOptions(data.contentCaptureOptions);
-        sendMessage(H.SET_CONTENT_CAPTURE_OPTIONS_CALLBACK, data.appInfo.packageName);
 
         mInitialApplication = app;
-        //更新HTTP代理
-        final boolean updateHttpProxy;
-        synchronized (this) {
-            updateHttpProxy = mUpdateHttpProxyOnBind;
-            // This synchronized block ensures that any subsequent call to updateHttpProxy()
-            // will see a non-null mInitialApplication.
-        }
-        if (updateHttpProxy) {
-            ActivityThread.updateHttpProxy(app);
-        }
 
         // don't bring up providers in restricted mode; they may depend on the
         // app's custom Application class
@@ -1701,9 +1718,18 @@ private void handleBindApplication(AppBindData data) {
         // Do this after providers, since instrumentation tests generally start their
         // test thread at this point, and we don't want that racing.
         //执行onCreate方法（默认Instrumentation实现为空方法）
-        mInstrumentation.onCreate(data.instrumentationArgs);
+        try {
+            mInstrumentation.onCreate(data.instrumentationArgs);
+        }
+        catch (Exception e) {
+            ...
+        }
         //执行Application的onCreate方法
-        mInstrumentation.callApplicationOnCreate(app);
+        try {
+            mInstrumentation.callApplicationOnCreate(app);
+        } catch (Exception e) {
+            ...
+        }
     } finally {
         // If the app targets < O-MR1, or doesn't change the thread policy
         // during startup, clobber the policy to maintain behavior of b/36951662
@@ -1773,50 +1799,23 @@ private void handleBindApplication(AppBindData data) {
 
 我们拣重点来看，首先是`Application`的创建过程
 
-## LoadedApk.makeApplicationInner
+## LoadedApk.makeApplication
 
-在上文的方法中，调用了`data.info.makeApplicationInner`方法创建`Application`，其中`data.info`为`LoadedApk`类型
+在上文的方法中，调用了`data.info.makeApplication`方法创建`Application`，其中`data.info`为`LoadedApk`类型
 
 ```java
-public Application makeApplicationInner(boolean forceDefaultAppClass,
+public Application makeApplication(boolean forceDefaultAppClass,
         Instrumentation instrumentation) {
-    return makeApplicationInner(forceDefaultAppClass, instrumentation,
-            /* allowDuplicateInstances= */ false);
-}
-
-private Application makeApplicationInner(boolean forceDefaultAppClass,
-        Instrumentation instrumentation, boolean allowDuplicateInstances) {
     //如果之前创建过了就可以直接返回
     if (mApplication != null) {
         return mApplication;
-    };
-
-    //从缓存中获取Application（多个App可以运行在同一个进程中）
-    synchronized (sApplications) {
-        final Application cached = sApplications.get(mPackageName);
-        if (cached != null) {
-            // Looks like this is always happening for the system server, because
-            // the LoadedApk created in systemMain() -> attach() isn't cached properly?
-            if (!"android".equals(mPackageName)) {
-                Slog.wtfStack(TAG, "App instance already created for package=" + mPackageName
-                        + " instance=" + cached);
-            }
-            if (!allowDuplicateInstances) {
-                mApplication = cached;
-                return cached;
-            }
-            // Some apps intentionally call makeApplication() to create a new Application
-            // instance... Sigh...
-        }
     }
 
     Application app = null;
 
-    final String myProcessName = Process.myProcessName();
     //获取Application类名（App可以自定义Application这个应该所有开发都知道吧）
     //对应AndroidManifest中application标签下的android:name属性
-    String appClass = mApplicationInfo.getCustomApplicationClassNameForProcess(
-            myProcessName);
+    String appClass = mApplicationInfo.className;
     //没有设置自定义Application或强制使用默认Application的情况下，使用默认Application
     if (forceDefaultAppClass || (appClass == null)) {
         appClass = "android.app.Application";
@@ -1853,32 +1852,18 @@ private Application makeApplicationInner(boolean forceDefaultAppClass,
                 cl, appClass, appContext);
         appContext.setOuterContext(app);
     } catch (Exception e) {
-        if (!mActivityThread.mInstrumentation.onException(app, e)) {
-            throw new RuntimeException(
-                "Unable to instantiate application " + appClass
-                + " package " + mPackageName + ": " + e.toString(), e);
-        }
+        ...
     }
-    //将App的Application添加到缓存中（多个App可以运行在同一个进程中）
+    //加入Application列表中（多个App可以运行在同一个进程中）
     mActivityThread.mAllApplications.add(app);
     mApplication = app;
-    if (!allowDuplicateInstances) {
-        synchronized (sApplications) {
-            sApplications.put(mPackageName, app);
-        }
-    }
 
-    //根据入参不会进入此case
     if (instrumentation != null) {
+        //调用Application的OnCreate方法
         try {
-            //调用Application的OnCreate方法
             instrumentation.callApplicationOnCreate(app);
         } catch (Exception e) {
-            if (!instrumentation.onException(app, e)) {
-                throw new RuntimeException(
-                    "Unable to create application " + app.getClass().getName()
-                    + ": " + e.toString(), e);
-            }
+            ...
         }
     }
 
@@ -1886,7 +1871,7 @@ private Application makeApplicationInner(boolean forceDefaultAppClass,
 }
 ```
 
-这个方法首先从缓存中尝试获取已创建过的`Application`，先尝试取成员变量`mApplication`，再尝试从静态变量`sApplications`中取，一开始我还没想通为什么还需要一个`sApplications`，后来想起来，多个App是可以在同一个进程中运行的
+这个方法首先尝试取成员变量`mApplication`，如果不为`null`，说明曾创建过，直接返回就可以了
 
 然后再去获取`Application`类名，默认为`android.app.Application`，开发可以通过设置`AndroidManifest`中`application`标签下的`android:name`属性来选择创建自定义的`Application`
 
@@ -1896,14 +1881,13 @@ private Application makeApplicationInner(boolean forceDefaultAppClass,
 
 然后创建`Application`，并将其设置成`ContextImpl`的`OuterContext`
 
-最后将创建好的`Application`放入缓存中，返回
+最后将创建好的`Application`设置给成员变量`mApplication`，方便以后获取，然后将其再添加到`mActivityThread.mAllApplications`列表中，返回
 
 ### ContextImpl.createAppContext
 
 我们简单看一下`ContextImpl`的创建，对于不同的组件，创建`ContextImpl`对象的方法不同，比如说`Activity`的`Context`是通过`createActivityContext`方法创建的，我们这里是通过`createAppContext`创建`Application`的`Context`的
 
 ```java
-@UnsupportedAppUsage
 static ContextImpl createAppContext(ActivityThread mainThread, LoadedApk packageInfo) {
     return createAppContext(mainThread, packageInfo, null);
 }
@@ -1911,11 +1895,12 @@ static ContextImpl createAppContext(ActivityThread mainThread, LoadedApk package
 static ContextImpl createAppContext(ActivityThread mainThread, LoadedApk packageInfo,
         String opPackageName) {
     if (packageInfo == null) throw new IllegalArgumentException("packageInfo");
-    ContextImpl context = new ContextImpl(null, mainThread, packageInfo, null, null, null, null,
-            0, null, opPackageName);
+    ContextImpl context = new ContextImpl(null, mainThread, packageInfo,
+        ContextParams.EMPTY, null, null, null, null, null, 0, null, opPackageName);
     context.setResources(packageInfo.getResources());
     //检查android.permission.STATUS_BAR_SERVICE权限
-    context.mIsSystemOrSystemUiContext = isSystemOrSystemUI(context);
+    context.mContextType = isSystemOrSystemUI(context) ? CONTEXT_TYPE_SYSTEM_OR_SYSTEM_UI
+            : CONTEXT_TYPE_NON_UI;
     return context;
 }
 ```
