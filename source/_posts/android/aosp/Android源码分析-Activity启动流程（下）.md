@@ -474,8 +474,6 @@ void scheduleTransaction(ClientTransaction transaction) {
 }
 ```
 
-## preExecute
-
 首先，调用`ClientTransaction.preExecute`方法，然后通过`Handler`发送执行一条`EXECUTE_TRANSACTION`消息，我们先看一下`preExecute`
 
 ```java
@@ -505,6 +503,7 @@ public void preExecute(ClientTransactionHandler client, IBinder token) {
 ```java
 // ResumeActivityItem
 public void preExecute(ClientTransactionHandler client, IBinder token) {
+    //这里mUpdateProcState为false，不执行
     if (mUpdateProcState) {
         client.updateProcessState(mProcState, false);
     }
@@ -527,8 +526,6 @@ public void handleMessage(Message msg) {
     ...
 }
 ```
-
-## execute
 
 这里可以看到，调用了`TransactionExecutor`对象的`execute`方法，`TransactionExecutor`对象在`ActivityThread`创建时便创建了，内部持有一个`ClientTransactionHandler`引用，即`ActivityThread`自身
 
@@ -597,7 +594,7 @@ public void executeCallbacks(ClientTransaction transaction) {
 }
 ```
 
-关于生命周期转换，由于`Activity`启动的当前阶段不会进入这些case，所以等之后碰到了再细说
+关于生命周期转换，由于`Activity`启动的当前阶段不会进入这些case，所以这里就不提了
 
 经过简化，实际上也就执行了`LaunchActivityItem.execute`和`LaunchActivityItem.postExecute`方法
 
@@ -613,6 +610,8 @@ public void execute(ClientTransactionHandler client, IBinder token,
 ```
 
 这里使用之前在`AMS`中创建`LaunchActivityItem`所使用到的信息，创建了一个`ActivityClientRecord`对象，接着回到`ActivityThread`，调用其`handleLaunchActivity`方法
+
+# handleLaunchActivity
 
 ```java
 public Activity handleLaunchActivity(ActivityClientRecord r,
@@ -651,8 +650,11 @@ public Activity handleLaunchActivity(ActivityClientRecord r,
         //设置Configuration
         r.createdConfig = new Configuration(mConfiguration);
         reportSizeConfigurations(r);
+        //设置一些延迟执行的动作（作用域到整个ClientTransaction结束）
         if (!r.activity.mFinished && pendingActions != null) {
             pendingActions.setOldState(r.state);
+            //当Activity生命周期走到onStart前，会通过这里设置的值
+            //判断是否需要执行onRestoreInstanceState、onPostCreate
             pendingActions.setRestoreInstanceState(true);
             pendingActions.setCallOnPostCreate(true);
         }
@@ -673,8 +675,6 @@ public Activity handleLaunchActivity(ActivityClientRecord r,
 ```
 
 这个方法中，最重要的莫过于`performLaunchActivity`了，它是创建`Activity`的核心方法
-
-### performLaunchActivity
 
 ```java
 /**  Core implementation of activity launch. */
@@ -825,7 +825,7 @@ private Activity performLaunchActivity(ActivityClientRecord r, Intent customInte
 
 我们重点看一下最主要的实例化、`attach`和`onCreate`这三点
 
-#### Instrumentation.newActivity
+## Instrumentation.newActivity
 
 我们在 [Android源码分析 - Activity启动流程（中）](https://juejin.cn/post/7172464885492613128/#heading-14) 中分析了，`Application`是怎么通过`Instrumentation`创建的，`Activity`的创建和它类似
 
@@ -852,7 +852,7 @@ public @NonNull Activity instantiateActivity(@NonNull ClassLoader cl, @NonNull S
 
 同样的，也是通过类名反射创建一个`Activity`的实例
 
-#### Activity.attach
+## Activity.attach
 
 紧接着，我们来看`Activity.attach`方法
 
@@ -942,8 +942,6 @@ final void attach(Context context, ActivityThread aThread,
 
 看完这个方法，我们可以发现，原来`Activity`的`Window`是在这个时候创建的，并且`Window`的具体实现类为`PhoneWindow`
 
-#### Instrumentation.callActivityOnCreate
-
 再然后便是通过`Instrumentation`执行`Activity`的`onCreate`生命周期方法了
 
 ```java
@@ -955,6 +953,8 @@ public void callActivityOnCreate(Activity activity, Bundle icicle) {
 ```
 
 其中`prePerformCreate`和`postPerformCreate`似乎只有在单元测试和CTS测试下才会产生实质性的影响，在正常情况下我们就当作它们不存在，我们接着看`performCreate`方法
+
+## Activity.performCreate
 
 ```java
 final void performCreate(Bundle icicle) {
@@ -968,19 +968,26 @@ final void performCreate(Bundle icicle, PersistableBundle persistentState) {
     // initialize mIsInMultiWindowMode and mIsInPictureInPictureMode before onCreate
     final int windowingMode = getResources().getConfiguration().windowConfiguration
             .getWindowingMode();
+    //多窗口模式
     mIsInMultiWindowMode = inMultiWindowMode(windowingMode);
+    //画中画模式（小窗播放视频等场景）
     mIsInPictureInPictureMode = windowingMode == WINDOWING_MODE_PINNED;
+    //恢复请求权限中的标志位
     restoreHasCurrentPermissionRequest(icicle);
+    //执行onCreate生命周期方法
     if (persistentState != null) {
         onCreate(icicle, persistentState);
     } else {
         onCreate(icicle);
     }
+    //共享元素动画相关
     mActivityTransitionState.readState(icicle);
 
     mVisibleFromClient = !mWindow.getWindowStyle().getBoolean(
             com.android.internal.R.styleable.Window_windowNoDisplay, false);
+    //FragmentManager分发ACTIVITY_CREATED状态
     mFragments.dispatchActivityCreated();
+    //共享元素动画相关
     mActivityTransitionState.setEnterActivityOptions(this, getActivityOptions());
     //分发PostCreated事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPostCreated回调
     dispatchActivityPostCreated(icicle);
@@ -989,3 +996,597 @@ final void performCreate(Bundle icicle, PersistableBundle persistentState) {
 
 其中的参数`icicle`就是我们平时重写`Activity.onCreate`方法时的第一个入参`savedInstanceState`，如果`Activity`发生了重建之类的情况，它会保存一些状态数据，第一次启动`Activity`时为`null`
 
+无论`persistentState`是否为`null`，最终都会进入到单个参数的`onCreate`方法中
+
+```java
+protected void onCreate(@Nullable Bundle savedInstanceState) {
+    //恢复LoaderManager
+    if (mLastNonConfigurationInstances != null) {
+        mFragments.restoreLoaderNonConfig(mLastNonConfigurationInstances.loaders);
+    }
+    //ActionBar
+    if (mActivityInfo.parentActivityName != null) {
+        if (mActionBar == null) {
+            mEnableDefaultActionBarUp = true;
+        } else {
+            mActionBar.setDefaultDisplayHomeAsUpEnabled(true);
+        }
+    }
+    if (savedInstanceState != null) {
+        //自动填充功能
+        mAutoFillResetNeeded = savedInstanceState.getBoolean(AUTOFILL_RESET_NEEDED, false);
+        mLastAutofillId = savedInstanceState.getInt(LAST_AUTOFILL_ID,
+                View.LAST_APP_AUTOFILL_ID);
+
+        if (mAutoFillResetNeeded) {
+            getAutofillManager().onCreate(savedInstanceState);
+        }
+
+        //恢复FragmentManager状态
+        Parcelable p = savedInstanceState.getParcelable(FRAGMENTS_TAG);
+        mFragments.restoreAllState(p, mLastNonConfigurationInstances != null
+                ? mLastNonConfigurationInstances.fragments : null);
+    }
+    //FragmentManager分发CREATED状态，执行内部Fragment的生命周期
+    mFragments.dispatchCreate();
+    //分发Created事件，执行所有注册的ActivityLifecycleCallbacks的onActivityCreated回调
+    dispatchActivityCreated(savedInstanceState);
+    //语音交互功能
+    if (mVoiceInteractor != null) {
+        mVoiceInteractor.attachActivity(this);
+    }
+    mRestoredFromBundle = savedInstanceState != null;
+    //这里表示已调用过super.onCreate方法
+    mCalled = true;
+}
+```
+
+到这里，`Activity`的`onCreate`生命周期就走完了，我们也可以从这整个流程中得到一些新的收获，比如说，原来注册在`Application`中的`ActivityLifecycleCallbacks`回调是在这里触发的，`FragmentManager`状态分发的顺序是这样的，为什么必须要调用`super.onCreate`方法等等
+
+接着，我们再回到`TransactionExecutor`中，它接下来执行的是`LaunchActivityItem.postExecute`
+
+```java
+public void postExecute(ClientTransactionHandler client, IBinder token,
+        PendingTransactionActions pendingActions) {
+    client.countLaunchingActivities(-1);
+}
+```
+
+这里就非常简单了，计数器减一
+
+`postExecute`执行完后，整个`LaunchActivityItem`的工作就完成了，接下来执行的是`TransactionExecutor.executeLifecycleState`方法
+
+```java
+private void executeLifecycleState(ClientTransaction transaction) {
+    final ActivityLifecycleItem lifecycleItem = transaction.getLifecycleStateRequest();
+    if (lifecycleItem == null) {
+        // No lifecycle request, return early.
+        return;
+    }
+
+    final IBinder token = transaction.getActivityToken();
+    final ActivityClientRecord r = mTransactionHandler.getActivityClient(token);
+
+    if (r == null) {
+        // Ignore requests for non-existent client records for now.
+        return;
+    }
+
+    // Cycle to the state right before the final requested state.
+    //excludeLastState为true的情况下，推进生命周期直到最终生命周期的上一个生命周期
+    //excludeLastState为false的情况下，推进生命周期直到最终生命周期
+    cycleToPath(r, lifecycleItem.getTargetState(), true /* excludeLastState */, transaction);
+
+    // Execute the final transition with proper parameters.
+    //执行最终的生命周期事务
+    lifecycleItem.execute(mTransactionHandler, token, mPendingActions);
+    lifecycleItem.postExecute(mTransactionHandler, token, mPendingActions);
+}
+```
+
+我们目前处在的生命周期为`ON_CREATE`最终目标要到达的生命周期为`ON_RESUME`，`cycleToPath`方法会帮助我们把生命周期推进到`ON_RESUME`的上一个生命周期也就是`ON_START`
+
+```java
+private void cycleToPath(ActivityClientRecord r, int finish, boolean excludeLastState,
+        ClientTransaction transaction) {
+    final int start = r.getLifecycleState();
+    final IntArray path = mHelper.getLifecyclePath(start, finish, excludeLastState);
+    performLifecycleSequence(r, path, transaction);
+}
+```
+
+`TransactionExecutorHelper.getLifecyclePath`方法会帮我们计算出一个剩余要经过的生命周期路线的一个有序数组
+
+```java
+public IntArray getLifecyclePath(int start, int finish, boolean excludeLastState) {
+    ... //错误判断
+
+    mLifecycleSequence.clear();
+    if (finish >= start) {
+        if (start == ON_START && finish == ON_STOP) {
+            // A case when we from start to stop state soon, we don't need to go
+            // through the resumed, paused state.
+            mLifecycleSequence.add(ON_STOP);
+        } else {
+            // just go there
+            //按顺序添加生命周期
+            for (int i = start + 1; i <= finish; i++) {
+                mLifecycleSequence.add(i);
+            }
+        }
+    } else { // finish < start, can't just cycle down
+        if (start == ON_PAUSE && finish == ON_RESUME) {
+            // Special case when we can just directly go to resumed state.
+            mLifecycleSequence.add(ON_RESUME);
+        } else if (start <= ON_STOP && finish >= ON_START) {
+            // Restart and go to required state.
+
+            // Go to stopped state first.
+            for (int i = start + 1; i <= ON_STOP; i++) {
+                mLifecycleSequence.add(i);
+            }
+            // Restart
+            mLifecycleSequence.add(ON_RESTART);
+            // Go to required state
+            for (int i = ON_START; i <= finish; i++) {
+                mLifecycleSequence.add(i);
+            }
+        } else {
+            // Relaunch and go to required state
+
+            // Go to destroyed state first.
+            for (int i = start + 1; i <= ON_DESTROY; i++) {
+                mLifecycleSequence.add(i);
+            }
+            // Go to required state
+            for (int i = ON_CREATE; i <= finish; i++) {
+                mLifecycleSequence.add(i);
+            }
+        }
+    }
+
+    // Remove last transition in case we want to perform it with some specific params.
+    if (excludeLastState && mLifecycleSequence.size() != 0) {
+        mLifecycleSequence.remove(mLifecycleSequence.size() - 1);
+    }
+
+    return mLifecycleSequence;
+}
+```
+
+其实从这个方法，我们就能看出`Activity`生命周期是怎么设计的，代码很简单，我就不解释了
+
+```java
+public static final int UNDEFINED = -1;
+public static final int PRE_ON_CREATE = 0;
+public static final int ON_CREATE = 1;
+public static final int ON_START = 2;
+public static final int ON_RESUME = 3;
+public static final int ON_PAUSE = 4;
+public static final int ON_STOP = 5;
+public static final int ON_DESTROY = 6;
+public static final int ON_RESTART = 7;
+```
+
+我们结合这上面这个生命周期大小来看，`start`为`ON_CREATE`，`finish`为`ON_RESUME`，`excludeLastState`为`true`移除最后一个生命周期，得出的结果便是`[ON_START]`，然后调用`performLifecycleSequence`方法执行生命周期
+
+```java
+private void performLifecycleSequence(ActivityClientRecord r, IntArray path,
+        ClientTransaction transaction) {
+    final int size = path.size();
+    for (int i = 0, state; i < size; i++) {
+        state = path.get(i);
+        switch (state) {
+            case ON_CREATE:
+                mTransactionHandler.handleLaunchActivity(r, mPendingActions,
+                        null /* customIntent */);
+                break;
+            case ON_START:
+                mTransactionHandler.handleStartActivity(r, mPendingActions,
+                        null /* activityOptions */);
+                break;
+            case ON_RESUME:
+                mTransactionHandler.handleResumeActivity(r, false /* finalStateRequest */,
+                        r.isForward, "LIFECYCLER_RESUME_ACTIVITY");
+                break;
+            case ON_PAUSE:
+                mTransactionHandler.handlePauseActivity(r, false /* finished */,
+                        false /* userLeaving */, 0 /* configChanges */,
+                        false /* autoEnteringPip */, mPendingActions,
+                        "LIFECYCLER_PAUSE_ACTIVITY");
+                break;
+            case ON_STOP:
+                mTransactionHandler.handleStopActivity(r, 0 /* configChanges */,
+                        mPendingActions, false /* finalStateRequest */,
+                        "LIFECYCLER_STOP_ACTIVITY");
+                break;
+            case ON_DESTROY:
+                mTransactionHandler.handleDestroyActivity(r, false /* finishing */,
+                        0 /* configChanges */, false /* getNonConfigInstance */,
+                        "performLifecycleSequence. cycling to:" + path.get(size - 1));
+                break;
+            case ON_RESTART:
+                mTransactionHandler.performRestartActivity(r, false /* start */);
+                break;
+            default:
+                throw new IllegalArgumentException("Unexpected lifecycle state: " + state);
+        }
+    }
+}
+```
+
+这个方法很简单啊，就是遍历这个数组，依次执行生命周期，结合我们传入的数组`[ON_START]`，最后便是调用`ActivityThread.handleStartActivity`方法
+
+# handleStartActivity
+
+```java
+public void handleStartActivity(IBinder token, PendingTransactionActions pendingActions) {
+    final ActivityClientRecord r = mActivities.get(token);
+    final Activity activity = r.activity;
+    ... //检查
+
+    unscheduleGcIdler();
+
+    // Start
+    //执行onStart生命周期
+    activity.performStart("handleStartActivity");
+    //设置生命周期状态为onStart
+    r.setState(ON_START);
+
+    if (pendingActions == null) {
+        // No more work to do.
+        return;
+    }
+
+    // Restore instance state
+    //之前在handleLaunchActivity方法中设置了pendingActions.setRestoreInstanceState(true)
+    //这里便会判断是否需要并执行Activity.onRestoreInstanceState
+    if (pendingActions.shouldRestoreInstanceState()) {
+        if (r.isPersistable()) {
+            if (r.state != null || r.persistentState != null) {
+                mInstrumentation.callActivityOnRestoreInstanceState(activity, r.state,
+                        r.persistentState);
+            }
+        } else if (r.state != null) {
+            mInstrumentation.callActivityOnRestoreInstanceState(activity, r.state);
+        }
+    }
+
+    // Call postOnCreate()
+    //之前在handleLaunchActivity方法中设置了pendingActions.setCallOnPostCreate(true)
+    //这里便会执行Activity.onPostCreate，如果不是从onCreate转到onStart，不会进入此case
+    if (pendingActions.shouldCallOnPostCreate()) {
+        activity.mCalled = false;
+        //调用Activity.onPostCreate
+        if (r.isPersistable()) {
+            mInstrumentation.callActivityOnPostCreate(activity, r.state,
+                    r.persistentState);
+        } else {
+            mInstrumentation.callActivityOnPostCreate(activity, r.state);
+        }
+        if (!activity.mCalled) {
+            //和onCreate一样，onPostCreate也必须要调用super.onPostCreate
+            throw new SuperNotCalledException(
+                    "Activity " + r.intent.getComponent().toShortString()
+                            + " did not call through to super.onPostCreate()");
+        }
+    }
+
+    //更新可见性
+    //Activity启动时，由于此时mDecor还未赋值，所以不会产生影响
+    updateVisibility(r, true /* show */);
+    mSomeActivitiesChanged = true;
+}
+```
+
+这里有一点需要注意，我们一般重写`Activity`的`onCreate`方法，在其中调用`setContentView`方法，此时`DecorView`虽然被创建出来了，但是只在`PhoneWindow`中持有，尚未给`Activity.mDecor`赋值，所以此时调用`updateVisibility`方法并不会将`DecorView`加入到`WindowManager`中，也就是目前界面还尚未可见
+
+另外，我们可以注意到，`performStart`是先于`callActivityOnPostCreate`，所以`Activity`中的生命周期回调`onPostCreate`是在`onStart`之后触发的，各位在开发App的时候不要弄错了这一点
+
+其他的地方注释都写的都很明白了哈，也没什么必要再看`performStart`了，无非也就和`performCreate`一样，执行`ActivityLifecycleCallbacks`回调，`FragmentManager`分发`STARTED`状态，调用`onStart`方法等
+
+接下来我们再回到`TransactionExecutor`中，后面便是执行`ResumeActivityItem`的`execute`和`postExecute`方法了
+
+```java
+public void execute(ClientTransactionHandler client, ActivityClientRecord r,
+        PendingTransactionActions pendingActions) {
+    client.handleResumeActivity(r, true /* finalStateRequest */, mIsForward,
+            "RESUME_ACTIVITY");
+}
+```
+
+可以看到，又执行了`ActivityThread.handleResumeActivity`方法
+
+# handleResumeActivity
+
+```java
+public void handleResumeActivity(IBinder token, boolean finalStateRequest, boolean isForward,
+        String reason) {
+    // If we are getting ready to gc after going to the background, well
+    // we are back active so skip it.
+    unscheduleGcIdler();
+    mSomeActivitiesChanged = true;
+
+    // TODO Push resumeArgs into the activity for consideration
+    //执行onResume生命周期
+    final ActivityClientRecord r = performResumeActivity(token, finalStateRequest, reason);
+    if (r == null) {
+        // We didn't actually resume the activity, so skipping any follow-up actions.
+        return;
+    }
+    //如果Activity将被destroy，那就没必要再执行resume了，直接返回
+    if (mActivitiesToBeDestroyed.containsKey(token)) {
+        // Although the activity is resumed, it is going to be destroyed. So the following
+        // UI operations are unnecessary and also prevents exception because its token may
+        // be gone that window manager cannot recognize it. All necessary cleanup actions
+        // performed below will be done while handling destruction.
+        return;
+    }
+
+    final Activity a = r.activity;
+
+    final int forwardBit = isForward
+            ? WindowManager.LayoutParams.SOFT_INPUT_IS_FORWARD_NAVIGATION : 0;
+
+    // If the window hasn't yet been added to the window manager,
+    // and this guy didn't finish itself or start another activity,
+    // then go ahead and add the window.
+    boolean willBeVisible = !a.mStartedActivity;
+    if (!willBeVisible) {
+        try {
+            willBeVisible = ActivityTaskManager.getService().willActivityBeVisible(
+                    a.getActivityToken());
+        } catch (RemoteException e) {
+            throw e.rethrowFromSystemServer();
+        }
+    }
+    //设置Window
+    if (r.window == null && !a.mFinished && willBeVisible) {
+        r.window = r.activity.getWindow();
+        View decor = r.window.getDecorView();
+        //DecorView暂时不可见
+        decor.setVisibility(View.INVISIBLE);
+        ViewManager wm = a.getWindowManager();
+        WindowManager.LayoutParams l = r.window.getAttributes();
+        //给Activity的mDecor成员变量赋值
+        a.mDecor = decor;
+        l.type = WindowManager.LayoutParams.TYPE_BASE_APPLICATION;
+        l.softInputMode |= forwardBit;
+        if (r.mPreserveWindow) {
+            a.mWindowAdded = true;
+            r.mPreserveWindow = false;
+            // Normally the ViewRoot sets up callbacks with the Activity
+            // in addView->ViewRootImpl#setView. If we are instead reusing
+            // the decor view we have to notify the view root that the
+            // callbacks may have changed.
+            ViewRootImpl impl = decor.getViewRootImpl();
+            if (impl != null) {
+                impl.notifyChildRebuilt();
+            }
+        }
+        //如果DecorView尚未添加到WindowManager中，将其添加进去，否则更新Window属性
+        //Activity启动过程中，第一次resume时，DecorView还尚未添加至WindowManager，所以会走进上面这个case
+        //由于我们之前将DecorView的Visibility设置成了INVISIBLE，所以此时界面还是不可见
+        if (a.mVisibleFromClient) {
+            if (!a.mWindowAdded) {
+                a.mWindowAdded = true;
+                wm.addView(decor, l);
+            } else {
+                // The activity will get a callback for this {@link LayoutParams} change
+                // earlier. However, at that time the decor will not be set (this is set
+                // in this method), so no action will be taken. This call ensures the
+                // callback occurs with the decor set.
+                a.onWindowAttributesChanged(l);
+            }
+        }
+
+        // If the window has already been added, but during resume
+        // we started another activity, then don't yet make the
+        // window visible.
+    } else if (!willBeVisible) {
+        r.hideForNow = true;
+    }
+
+    // Get rid of anything left hanging around.
+    //清除遗留的东西
+    cleanUpPendingRemoveWindows(r, false /* force */);
+
+    // The window is now visible if it has been added, we are not
+    // simply finishing, and we are not starting another activity.
+    if (!r.activity.mFinished && willBeVisible && r.activity.mDecor != null && !r.hideForNow) {
+        //分发Configuration更新事件
+        if (r.newConfig != null) {
+            performConfigurationChangedForActivity(r, r.newConfig);
+            r.newConfig = null;
+        }
+        //当DecorView add进WindowManager后，ViewRootImpl被创建
+        ViewRootImpl impl = r.window.getDecorView().getViewRootImpl();
+        WindowManager.LayoutParams l = impl != null
+                ? impl.mWindowAttributes : r.window.getAttributes();
+
+        ... //软键盘相关
+
+        r.activity.mVisibleFromServer = true;
+        mNumVisibleActivities++;
+        //使DecorView可见
+        if (r.activity.mVisibleFromClient) {
+            r.activity.makeVisible();
+        }
+    }
+
+    //当空闲时，检查处理其他后台Activity状态
+    //对处在stopping或finishing的Activity执行onStop或onDestroy生命周期
+    r.nextIdle = mNewActivities;
+    mNewActivities = r;
+    Looper.myQueue().addIdleHandler(new Idler());
+}
+```
+
+这里有三个重要的地方需要注意：
+
+1. 执行`performResumeActivity`，这里和之前分析的两个生命周期类似，我们后面再看
+
+2. 给`Activity`的`mDecor`成员变量赋值，将`DecorView`添加到`WindowManager`中，使`DecorView`可见
+
+3. 将上一个活动的`ActivityClientRecord`以链表的形式串在当前`ActivityClientRecord`后面，向`MessageQueue`添加一条闲时处理消息`Idler`，这条消息会遍历`ActivityClientRecord`的整条`nextIdle`链，依次检查是否需要`stop`或`destroy` `Activity`，这一点我会在后面关于`Activity`其他生命周期的文章中再分析
+
+接下来我们简单过一下`performResumeActivity`吧
+
+```java
+public ActivityClientRecord performResumeActivity(IBinder token, boolean finalStateRequest,
+        String reason) {
+    final ActivityClientRecord r = mActivities.get(token);
+
+    ... //状态检查
+
+    //为最终生命周期状态
+    if (finalStateRequest) {
+        r.hideForNow = false;
+        r.activity.mStartedActivity = false;
+    }
+    try {
+        r.activity.onStateNotSaved();
+        //标记Fragments状态为未保存
+        r.activity.mFragments.noteStateNotSaved();
+        //更新网络状态
+        checkAndBlockForNetworkAccess();
+        if (r.pendingIntents != null) {
+            deliverNewIntents(r, r.pendingIntents);
+            r.pendingIntents = null;
+        }
+        if (r.pendingResults != null) {
+            deliverResults(r, r.pendingResults, reason);
+            r.pendingResults = null;
+        }
+        //执行Activity.onResume生命周期
+        r.activity.performResume(r.startsNotResumed, reason);
+
+        //将保存信息的savedInstanceState和persistentState重置为null
+        r.state = null;
+        r.persistentState = null;
+        //设置生命周期状态
+        r.setState(ON_RESUME);
+
+        //回调Activity.onTopResumedActivityChanged，报告栈顶活动Activity发生变化
+        reportTopResumedActivityChanged(r, r.isTopResumedActivity, "topWhenResuming");
+    } catch (Exception e) {
+        ...
+    }
+    return r;
+}
+```
+
+```java
+final void performResume(boolean followedByPause, String reason) {
+    //回调ActivityLifecycleCallbacks.onActivityPreResumed
+    dispatchActivityPreResumed();
+    //执行onRestart生命周期
+    //内部会判断当前Activity是否为stop状态，是的话才会真正执行onRestart生命周期
+    //启动Activity第一次resume时不会进入onRestart生命周期
+    performRestart(true /* start */, reason);
+
+    mFragments.execPendingActions();
+
+    mLastNonConfigurationInstances = null;
+
+    ... //自动填充功能
+
+    mCalled = false;
+    // mResumed is set by the instrumentation
+    //执行Activity.onResume回调
+    mInstrumentation.callActivityOnResume(this);
+    if (!mCalled) {
+        //必须执行super.onResume方法
+        throw new SuperNotCalledException(
+            "Activity " + mComponent.toShortString() +
+            " did not call through to super.onResume()");
+    }
+
+    // invisible activities must be finished before onResume() completes
+    ... //异常检查
+
+    // Now really resume, and install the current status bar and menu.
+    mCalled = false;
+
+    //FragmentManager分发resume状态
+    mFragments.dispatchResume();
+    mFragments.execPendingActions();
+
+    //执行onPostResume回调
+    onPostResume();
+    if (!mCalled) {
+        //必须要执行super.onPostResume
+        throw new SuperNotCalledException(
+            "Activity " + mComponent.toShortString() +
+            " did not call through to super.onPostResume()");
+    }
+    //回调ActivityLifecycleCallbacks.onActivityPostResumed
+    dispatchActivityPostResumed();
+}
+```
+
+```java
+protected void onResume() {
+    //回调ActivityLifecycleCallbacks.onActivityResumed
+    dispatchActivityResumed();
+    //共享元素动画
+    mActivityTransitionState.onResume(this);
+    ... //自动填充功能
+    notifyContentCaptureManagerIfNeeded(CONTENT_CAPTURE_RESUME);
+
+    mCalled = true;
+}
+```
+
+可以看到，基本上和之前的两个生命周期的执行是一个套路，唯一需要注意的是，在执行`onResume`生命周期之前，会先检查`Activity`是否处在`stop`状态，如果是的话，则会先执行`onRestart`生命周期，其他地方我在注释上标注的应该已经很明白了，这里就不再多讲了
+
+不要忘了，在`TransactionExecutor`中还有最后一步`ResumeActivityItem.postExecute`没做
+
+```java
+public void postExecute(ClientTransactionHandler client, IBinder token,
+        PendingTransactionActions pendingActions) {
+    try {
+        // TODO(lifecycler): Use interface callback instead of AMS.
+        ActivityTaskManager.getService().activityResumed(token);
+    } catch (RemoteException ex) {
+        throw ex.rethrowFromSystemServer();
+    }
+}
+```
+
+这里通过`Binder`又回到了系统进程调用了`ATMS.activityResumed`方法
+
+```java
+public final void activityResumed(IBinder token) {
+    final long origId = Binder.clearCallingIdentity();
+    synchronized (mGlobalLock) {
+        ActivityRecord.activityResumedLocked(token);
+    }
+    Binder.restoreCallingIdentity(origId);
+}
+```
+
+```java
+static void activityResumedLocked(IBinder token, boolean handleSplashScreenExit) {
+    final ActivityRecord r = ActivityRecord.forTokenLocked(token);
+    if (r == null) {
+        // If an app reports resumed after a long delay, the record on server side might have
+        // been removed (e.g. destroy timeout), so the token could be null.
+        return;
+    }
+    //SplashScreen
+    r.setCustomizeSplashScreenExitAnimation(handleSplashScreenExit);
+    //重置savedState Bundle
+    r.setSavedState(null /* savedState */);
+
+    r.mDisplayContent.handleActivitySizeCompatModeIfNeeded(r);
+    //防闪烁功能
+    r.mDisplayContent.mUnknownAppVisibilityController.notifyAppResumedFinished(r);
+}
+```
+
+可以看到，最后也就做了一些收尾工作，到这里，整个`Activity`的启动流程也就圆满结束了
+
+# 结尾
+
+至此为止，我们`Activity`启动流程三部连续剧终于是圆满完成了，历时整整半年的时间，我心里压着的这块石头也终于是落地了，后面我应该会再做一些关于`Activity`其他生命周期变换的分析，比如说`Activity`是怎样销毁的，欢迎感兴趣的小伙伴点赞、收藏、关注我
