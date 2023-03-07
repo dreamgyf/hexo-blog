@@ -317,13 +317,14 @@ private fun fixSingleNavBarMargin(view: View) {
         val realNavigationBarHeight = getRealNavigationBarHeight(viewForCalculate)
         lp.bottomMargin = rawBottomMargin + realNavigationBarHeight
         view.requestLayout()
-    } else {
-        val hostRef = WeakReference(viewForCalculate)
-        val viewRef = WeakReference(view)
-        val info = NavigationViewInfo(hostRef, viewRef, rawBottomMargin, actionMarginNavigation)
-        navigationViewInfoList.add(info)
-        viewForCalculate.setOnApplyWindowInsetsListener(onApplyWindowInsetsListener)
     }
+    
+    //isAttachedToWindow方法并不能保证此时的WindowInsets是正确的，仍然需要添加监听
+    val hostRef = WeakReference(viewForCalculate)
+    val viewRef = WeakReference(view)
+    val info = NavigationViewInfo(hostRef, viewRef, rawBottomMargin, actionMarginNavigation)
+    navigationViewInfoList.add(info)
+    viewForCalculate.setOnApplyWindowInsetsListener(onApplyWindowInsetsListener)
 }
 
 fun paddingByNavBar(view: View) {
@@ -339,14 +340,15 @@ fun paddingByNavBar(view: View) {
             view.paddingRight,
             rawBottomPadding + realNavigationBarHeight
         )
-    } else {
-        val hostRef = WeakReference(viewForCalculate)
-        val viewRef = WeakReference(view)
-        val info =
-            NavigationViewInfo(hostRef, viewRef, rawBottomPadding, actionPaddingNavigation)
-        navigationViewInfoList.add(info)
-        viewForCalculate.setOnApplyWindowInsetsListener(onApplyWindowInsetsListener)
     }
+
+    //isAttachedToWindow方法并不能保证此时的WindowInsets是正确的，仍然需要添加监听
+    val hostRef = WeakReference(viewForCalculate)
+    val viewRef = WeakReference(view)
+    val info =
+        NavigationViewInfo(hostRef, viewRef, rawBottomPadding, actionPaddingNavigation)
+    navigationViewInfoList.add(info)
+    viewForCalculate.setOnApplyWindowInsetsListener(onApplyWindowInsetsListener)
 }
 
 /**
@@ -371,6 +373,8 @@ private fun getRealNavigationBarHeight(view: View): Int {
 ```
 
 我简单解释一下这段代码：为所有需要沉浸的页面的根`View`设置同一个回调，并将待适配导航栏高度的`View`添加到列表中，当`WindowInsets`回调触发后，遍历这个列表，判断触发回调的`View`的`host`是否与待适配导航栏高度的`View`对应，对应的话则处理`View`适配导航栏高度
+
+这里需要注意，`WindowInsets`的分发其实是在`dispatchAttachedToWindow`之后的，所以`isAttachedToWindow`方法并不能保证此时的`WindowInsets`是正确的，具体可以去看`ViewRootImpl`中的源码，关键方法：`dispatchApplyInsets`，这里判断`isAttachedToWindow`并设置高度是为了防止出现`View`已经完全布局完成，之后再也不会触发`OnApplyWindowInsets`的情况
 
 这里我也测试了内存泄漏情况，确认无内存泄漏，大家可以放心食用
 
