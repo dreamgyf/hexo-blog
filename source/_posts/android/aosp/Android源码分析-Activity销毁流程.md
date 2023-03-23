@@ -376,9 +376,9 @@ void performClearTask(String reason) {
 
 ```java
 /**
-* Sets the result for activity that started this one, clears the references to activities
-* started for result from this one, and clears new intents.
-*/
+ * Sets the result for activity that started this one, clears the references to activities
+ * started for result from this one, and clears new intents.
+ */
 private void finishActivityResults(int resultCode, Intent resultData,
         NeededUriGrants resultGrants) {
     // Send the result if needed
@@ -426,18 +426,18 @@ void addResultLocked(ActivityRecord from, String resultWho,
 
 ```java
 /**
-* Start pausing the currently resumed activity.  It is an error to call this if there
-* is already an activity being paused or there is no resumed activity.
-*
-* @param userLeaving True if this should result in an onUserLeaving to the current activity.
-* @param uiSleeping True if this is happening with the user interface going to sleep (the
-* screen turning off).
-* @param resuming The activity we are currently trying to resume or null if this is not being
-*                 called as part of resuming the top activity, so we shouldn't try to instigate
-*                 a resume here if not null.
-* @return Returns true if an activity now is in the PAUSING state, and we are waiting for
-* it to tell us when it is done.
-*/
+ * Start pausing the currently resumed activity.  It is an error to call this if there
+ * is already an activity being paused or there is no resumed activity.
+ *
+ * @param userLeaving True if this should result in an onUserLeaving to the current activity.
+ * @param uiSleeping True if this is happening with the user interface going to sleep (the
+ * screen turning off).
+ * @param resuming The activity we are currently trying to resume or null if this is not being
+ *                 called as part of resuming the top activity, so we shouldn't try to instigate
+ *                 a resume here if not null.
+ * @return Returns true if an activity now is in the PAUSING state, and we are waiting for
+ * it to tell us when it is done.
+ */
 final boolean startPausingLocked(boolean userLeaving, boolean uiSleeping,
         ActivityRecord resuming) {
     //已有Activity正在暂停中
@@ -535,5 +535,148 @@ final boolean startPausingLocked(boolean userLeaving, boolean uiSleeping,
         }
         return false;
     }
+}
+```
+
+可以看到，和`Activity`启动流程类似，该方法里面调用了`ClientLifecycleManager.scheduleTransaction`方法来调度`Activity`暂停的生命周期，具体是怎样调度的可以看我之前的文章 [Android源码分析 - Activity启动流程（下）](https://juejin.cn/post/7195458962328649788#heading-5)，里面分析了`ClientTransaction`事务是怎么被调度执行的
+
+了解完后我们就可以知道，生命周期事务的执行也就相当于分别调用`ActivityLifecycleItem`的`preExecute`、`execute`、`postExecute`方法，而`PauseActivityItem`没有重写`preExecute`方法，所以我们就依次分析其`execute`、`postExecute`方法就好了
+
+```java
+public void execute(ClientTransactionHandler client, IBinder token,
+        PendingTransactionActions pendingActions) {
+    client.handlePauseActivity(token, mFinished, mUserLeaving, mConfigChanges, pendingActions,
+            "PAUSE_ACTIVITY_ITEM");
+}
+```
+
+`ClientTransactionHandler`这个我们之前说过，这是一个抽象类，被`ActivityThread`继承实现，所以这里实际上就是调用`ActivityThread.handlePauseActivity`方法
+
+```java
+public void handlePauseActivity(IBinder token, boolean finished, boolean userLeaving,
+        int configChanges, PendingTransactionActions pendingActions, String reason) {
+    ActivityClientRecord r = mActivities.get(token);
+    if (r != null) {
+        ...
+        r.activity.mConfigChangeFlags |= configChanges;
+        performPauseActivity(r, finished, reason, pendingActions);
+
+        // Make sure any pending writes are now committed.
+        //确保所有全局任务都被处理完成
+        if (r.isPreHoneycomb()) {
+            QueuedWork.waitToFinish();
+        }
+        //更新标记
+        mSomeActivitiesChanged = true;
+    }
+}
+
+/**
+ * Pause the activity.
+ * @return Saved instance state for pre-Honeycomb apps if it was saved, {@code null} otherwise.
+ */
+private Bundle performPauseActivity(ActivityClientRecord r, boolean finished, String reason,
+        PendingTransactionActions pendingActions) {
+    ... //异常状态检查
+    if (finished) {
+        r.activity.mFinished = true;
+    }
+
+    // Pre-Honeycomb apps always save their state before pausing
+    //是否需要保存状态信息（Android 3.0前无论是否finish都会触发保存）
+    final boolean shouldSaveState = !r.activity.mFinished && r.isPreHoneycomb();
+    if (shouldSaveState) {
+        //回调Activity的onSaveInstanceState方法
+        callActivityOnSaveInstanceState(r);
+    }
+
+    performPauseActivityIfNeeded(r, reason);
+
+    ...//回调OnActivityPausedListener，目前看来只有NFC部分有注册这个回调
+
+    ... //Android 3.0之前的特殊处理
+
+    //返回保存状态的Bundle
+    return shouldSaveState ? r.state : null;
+}
+
+private void performPauseActivityIfNeeded(ActivityClientRecord r, String reason) {
+    //已暂停，直接返回
+    if (r.paused) {
+        // You are already paused silly...
+        return;
+    }
+
+    // Always reporting top resumed position loss when pausing an activity. If necessary, it
+    // will be restored in performResumeActivity().
+    //报告resume状态变更
+    reportTopResumedActivityChanged(r, false /* onTop */, "pausing");
+
+    try {
+        r.activity.mCalled = false;
+        //回调Activity的onPause方法
+        mInstrumentation.callActivityOnPause(r.activity);
+        if (!r.activity.mCalled) {
+            //必须要调用super.onPause方法
+            throw new SuperNotCalledException("Activity " + safeToComponentShortString(r.intent)
+                    + " did not call through to super.onPause()");
+        }
+    } catch ...
+    //设置状态
+    r.setState(ON_PAUSE);
+}
+```
+
+这一条调用链路看下来还是很简单的，和之前我们分析过的其他生命周期调用是一个套路，这里显示调用了`callActivityOnSaveInstanceState`方法保存状态信息
+
+```java
+private void callActivityOnSaveInstanceState(ActivityClientRecord r) {
+    r.state = new Bundle();
+    r.state.setAllowFds(false);
+    if (r.isPersistable()) {
+        r.persistentState = new PersistableBundle();
+        mInstrumentation.callActivityOnSaveInstanceState(r.activity, r.state,
+                r.persistentState);
+    } else {
+        mInstrumentation.callActivityOnSaveInstanceState(r.activity, r.state);
+    }
+}
+```
+
+通过`Instrumentation`调用`Activity.performSaveInstanceState`方法
+
+```java
+final void performSaveInstanceState(@NonNull Bundle outState) {
+    //分发PreSaveInstanceState事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPreSaveInstanceState回调
+    dispatchActivityPreSaveInstanceState(outState);
+    //回调onSaveInstanceState
+    onSaveInstanceState(outState);
+    //保存受管理的Dialog的状态
+    saveManagedDialogs(outState);
+    //共享元素动画相关
+    mActivityTransitionState.saveState(outState);
+    //保存权限请求状态
+    storeHasCurrentPermissionRequest(outState);
+    //分发PostSaveInstanceState事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPostSaveInstanceState回调
+    dispatchActivityPostSaveInstanceState(outState);
+}
+```
+
+最终回调`Activity.onSaveInstanceState`方法
+
+```java
+protected void onSaveInstanceState(@NonNull Bundle outState) {
+    outState.putBundle(WINDOW_HIERARCHY_TAG, mWindow.saveHierarchyState());
+
+    outState.putInt(LAST_AUTOFILL_ID, mLastAutofillId);
+    Parcelable p = mFragments.saveAllState();
+    if (p != null) {
+        outState.putParcelable(FRAGMENTS_TAG, p);
+    }
+    if (mAutoFillResetNeeded) {
+        outState.putBoolean(AUTOFILL_RESET_NEEDED, true);
+        getAutofillManager().onSaveInstanceState(outState);
+    }
+    dispatchActivitySaveInstanceState(outState);
 }
 ```
