@@ -666,17 +666,295 @@ final void performSaveInstanceState(@NonNull Bundle outState) {
 
 ```java
 protected void onSaveInstanceState(@NonNull Bundle outState) {
+    //保存窗口信息
     outState.putBundle(WINDOW_HIERARCHY_TAG, mWindow.saveHierarchyState());
 
     outState.putInt(LAST_AUTOFILL_ID, mLastAutofillId);
+    //保存Fragment状态
     Parcelable p = mFragments.saveAllState();
     if (p != null) {
         outState.putParcelable(FRAGMENTS_TAG, p);
     }
+    //自动填充相关
     if (mAutoFillResetNeeded) {
         outState.putBoolean(AUTOFILL_RESET_NEEDED, true);
         getAutofillManager().onSaveInstanceState(outState);
     }
+    //分发SaveInstanceState事件，执行所有注册的ActivityLifecycleCallbacks的onActivitySaveInstanceState回调
     dispatchActivitySaveInstanceState(outState);
+}
+```
+
+保存状态的流程就基本完成了，我们再回过头来看`onPause`的触发
+
+在上面`performPauseActivityIfNeeded`方法中有一行代码调用了`Instrumentation.callActivityOnPause`方法，
+通过`Instrumentation`调用了`Activity.performPause`方法
+
+```java
+final void performPause() {
+    //分发PrePaused事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPrePaused回调
+    dispatchActivityPrePaused();
+    mDoReportFullyDrawn = false;
+    //FragmentManager分发pause状态
+    mFragments.dispatchPause();
+    mCalled = false;
+    //回调onPause
+    onPause();
+    mResumed = false;
+    //Target Sdk 9以上（Android 2.3）需要保证在onPause中调用super.onPause方法
+    if (!mCalled && getApplicationInfo().targetSdkVersion
+            >= android.os.Build.VERSION_CODES.GINGERBREAD) {
+        throw new SuperNotCalledException(
+                "Activity " + mComponent.toShortString() +
+                " did not call through to super.onPause()");
+    }
+    //分发PostPaused事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPostPaused回调
+    dispatchActivityPostPaused();
+}
+```
+
+```java
+protected void onPause() {
+    //分发Paused事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPaused回调
+    dispatchActivityPaused();
+    //自动填充相关
+    if (mAutoFillResetNeeded) {
+        if (!mAutoFillIgnoreFirstResumePause) {
+            View focus = getCurrentFocus();
+            if (focus != null && focus.canNotifyAutofillEnterExitEvent()) {
+                getAutofillManager().notifyViewExited(focus);
+            }
+        } else {
+            // reset after first pause()
+            mAutoFillIgnoreFirstResumePause = false;
+        }
+    }
+    //内容捕获服务
+    notifyContentCaptureManagerIfNeeded(CONTENT_CAPTURE_PAUSE);
+    //确保super.onPause被执行
+    mCalled = true;
+}
+```
+
+到此为止，`Activity`的`onPause`生命周期已经基本走完了，此时我们再回到`PauseActivityItem.postExecute`方法中做一些善后处理
+
+```java
+public void postExecute(ClientTransactionHandler client, IBinder token,
+        PendingTransactionActions pendingActions) {
+    //mDontReport为我们之前obtain方法中传入的pauseImmediately参数，始终为false
+    if (mDontReport) {
+        return;
+    }
+    try {
+        // TODO(lifecycler): Use interface callback instead of AMS.
+        //调用ATMS.activityPaused方法
+        ActivityTaskManager.getService().activityPaused(token);
+    } catch (RemoteException ex) {
+        throw ex.rethrowFromSystemServer();
+    }
+}
+```
+
+这里调用`ATMS.activityPaused`方法回到`system_server`进程处理`Activity`暂停后的事项
+
+```java
+public final void activityPaused(IBinder token) {
+    final long origId = Binder.clearCallingIdentity();
+    synchronized (mGlobalLock) {
+        //通过ActivityRecord.Token获取ActivityRecord
+        final ActivityRecord r = ActivityRecord.forTokenLocked(token);
+        if (r != null) {
+            r.activityPaused(false);
+        }
+    }
+    Binder.restoreCallingIdentity(origId);
+}
+```
+
+调用`ActivityRecord.activityPaused`方法继续处理
+
+```java
+void activityPaused(boolean timeout) {
+    final ActivityStack stack = getStack();
+
+    if (stack != null) {
+        //移除超时监听
+        removePauseTimeout();
+
+        if (stack.mPausingActivity == this) {
+            //暂停布局工作
+            mAtmService.deferWindowLayout();
+            try {
+                stack.completePauseLocked(true /* resumeNext */, null /* resumingActivity */);
+            } finally {
+                //恢复布局工作
+                mAtmService.continueWindowLayout();
+            }
+            return;
+        } else { //暂停Activity失败
+            if (isState(PAUSING)) {
+                setState(PAUSED, "activityPausedLocked");
+                if (finishing) {
+                    completeFinishing("activityPausedLocked");
+                }
+            }
+        }
+    }
+
+    //更新Activity可见性
+    mRootWindowContainer.ensureActivitiesVisible(null, 0, !PRESERVE_WINDOWS);
+}
+```
+
+正常情况下会进入到`ActivityStack.completePauseLocked`方法中，但在暂停`Activity`失败的情况下，如果当前状态为`PAUSING`，则直接将其状态置为`PAUSED`已暂停，如果被标记为`finishing`，则会调用`ActivityRecord.completeFinishing`继续`finish`流程，这其实和正常情况下的调用链路差不多，具体我们往下就能看到
+
+```java
+void completePauseLocked(boolean resumeNext, ActivityRecord resuming) {
+    ActivityRecord prev = mPausingActivity;
+
+    if (prev != null) {
+        prev.setWillCloseOrEnterPip(false);
+        //之前的状态是否为正在停止
+        final boolean wasStopping = prev.isState(STOPPING);
+        //设置状态为已暂停
+        prev.setState(PAUSED, "completePausedLocked");
+        if (prev.finishing) {
+            //继续finish流程
+            prev = prev.completeFinishing("completePausedLocked");
+        } else if (prev.hasProcess()) {
+            //Configuration发生变化时可能会设置这个flag
+            if (prev.deferRelaunchUntilPaused) {
+                // Complete the deferred relaunch that was waiting for pause to complete.
+                //等待暂停完成后relaunch Activity
+                prev.relaunchActivityLocked(prev.preserveWindowOnDeferredRelaunch);
+            } else if (wasStopping) {
+                // We are also stopping, the stop request must have gone soon after the pause.
+                // We can't clobber it, because the stop confirmation will not be handled.
+                // We don't need to schedule another stop, we only need to let it happen.
+                //之前的状态为正在停止，将状态置回即可
+                prev.setState(STOPPING, "completePausedLocked");
+            } else if (!prev.mVisibleRequested || shouldSleepOrShutDownActivities()) {
+                // Clear out any deferred client hide we might currently have.
+                prev.setDeferHidingClient(false);
+                // If we were visible then resumeTopActivities will release resources before
+                // stopping.
+                //添加到stop列表中等待空闲时执行stop
+                prev.addToStopping(true /* scheduleIdle */, false /* idleDelayed */,
+                        "completePauseLocked");
+            }
+        } else {
+            //App在pause过程中死亡
+            prev = null;
+        }
+        // It is possible the activity was freezing the screen before it was paused.
+        // In that case go ahead and remove the freeze this activity has on the screen
+        // since it is no longer visible.
+        if (prev != null) {
+            //停止屏幕冻结
+            prev.stopFreezingScreenLocked(true /*force*/);
+        }
+        //Activity暂停完毕
+        mPausingActivity = null;
+    }
+
+    //恢复前一个顶层Activity
+    if (resumeNext) {
+        final ActivityStack topStack = mRootWindowContainer.getTopDisplayFocusedStack();
+        if (topStack != null && !topStack.shouldSleepOrShutDownActivities()) {
+            mRootWindowContainer.resumeFocusedStacksTopActivities(topStack, prev, null);
+        } else {
+            checkReadyForSleep();
+            final ActivityRecord top = topStack != null ? topStack.topRunningActivity() : null;
+            if (top == null || (prev != null && top != prev)) {
+                // If there are no more activities available to run, do resume anyway to start
+                // something. Also if the top activity on the stack is not the just paused
+                // activity, we need to go ahead and resume it to ensure we complete an
+                // in-flight app switch.
+                mRootWindowContainer.resumeFocusedStacksTopActivities();
+            }
+        }
+    }
+
+    if (prev != null) {
+        //恢复按键分发
+        prev.resumeKeyDispatchingLocked();
+        ... //更新统计信息
+    }
+
+    //更新Activity可见性
+    mRootWindowContainer.ensureActivitiesVisible(resuming, 0, !PRESERVE_WINDOWS);
+
+    // Notify when the task stack has changed, but only if visibilities changed (not just
+    // focus). Also if there is an active pinned stack - we always want to notify it about
+    // task stack changes, because its positioning may depend on it.
+    //通知Task状态发生变化
+    if (mStackSupervisor.mAppVisibilitiesChangedSinceLastPause
+            || (getDisplayArea() != null && getDisplayArea().hasPinnedTask())) {
+        mAtmService.getTaskChangeNotificationController().notifyTaskStackChanged();
+        mStackSupervisor.mAppVisibilitiesChangedSinceLastPause = false;
+    }
+}
+```
+
+可以看到，无论暂停成功与否，最后都会走到`ActivityRecord.completeFinishing`方法中
+
+```java
+/**
+ * Complete activity finish request that was initiated earlier. If the activity is still
+ * pausing we will wait for it to complete its transition. If the activity that should appear in
+ * place of this one is not visible yet - we'll wait for it first. Otherwise - activity can be
+ * destroyed right away.
+ * @param reason Reason for finishing the activity.
+ * @return Flag indicating whether the activity was removed from history.
+ */
+ActivityRecord completeFinishing(String reason) {
+    ... //状态检查
+
+    final boolean isCurrentVisible = mVisibleRequested || isState(PAUSED);
+    if (isCurrentVisible) {
+        ... //更新Activity可见性
+    }
+
+    boolean activityRemoved = false;
+
+    // If this activity is currently visible, and the resumed activity is not yet visible, then
+    // hold off on finishing until the resumed one becomes visible.
+    // The activity that we are finishing may be over the lock screen. In this case, we do not
+    // want to consider activities that cannot be shown on the lock screen as running and should
+    // proceed with finishing the activity if there is no valid next top running activity.
+    // Note that if this finishing activity is floating task, we don't need to wait the
+    // next activity resume and can destroy it directly.
+    // TODO(b/137329632): find the next activity directly underneath this one, not just anywhere
+    final ActivityRecord next = getDisplayArea().topRunningActivity(
+            true /* considerKeyguardState */);
+    // isNextNotYetVisible is to check if the next activity is invisible, or it has been
+    // requested to be invisible but its windows haven't reported as invisible.  If so, it
+    // implied that the current finishing activity should be added into stopping list rather
+    // than destroy immediately.
+    final boolean isNextNotYetVisible = next != null
+            && (!next.nowVisible || !next.mVisibleRequested);
+
+    //如果此Activity当前可见，而要恢复的Activity还不可见，则推迟finish，直到要恢复的Activity可见为止
+    if (isCurrentVisible && isNextNotYetVisible) {
+        // Add this activity to the list of stopping activities. It will be processed and
+        // destroyed when the next activity reports idle.
+        //添加到stop列表中等待空闲时执行stop
+        addToStopping(false /* scheduleIdle */, false /* idleDelayed */,
+                "completeFinishing");
+        //设置状态为stop中
+        setState(STOPPING, "completeFinishing");
+    } else if (addToFinishingAndWaitForIdle()) {
+        // We added this activity to the finishing list and something else is becoming resumed.
+        // The activity will complete finishing when the next activity reports idle. No need to
+        // do anything else here.
+        //将此Activity添加到待finish列表中，等待空闲时执行finish
+    } else {
+        // Not waiting for the next one to become visible, and nothing else will be resumed in
+        // place of this activity - requesting destruction right away.
+        //立刻销毁此Activity
+        activityRemoved = destroyIfPossible(reason);
+    }
+
+    return activityRemoved ? null : this;
 }
 ```
