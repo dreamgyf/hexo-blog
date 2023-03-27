@@ -958,3 +958,161 @@ ActivityRecord completeFinishing(String reason) {
     return activityRemoved ? null : this;
 }
 ```
+
+对于非锁屏状态且当前要销毁的`Activity`在前台的情况下，该`Activity`可见而待恢复的`Activity`尚不可见，此时优先完成待恢复`Activity`的`resume`生命周期，等到之后空闲再去处理待销毁`Activity`的`destroy`生命周期
+
+所以在面试中常问的`Activity`从`B`返回到`A`的生命周期顺序我们从这里就可以看出来，理解后我们就不用去死记硬背了：
+
+`B.onPause` -> `A.onRestart` -> `A.onResume` -> `B.onStop` -> `B.onDestory`
+
+对于锁屏状态或者要销毁的`Activity`不在前台的情况下，由于不需要立刻恢复`Activity`，所以可能会直接处理待销毁`Activity`的`destroy`生命周期
+
+我们以第一种当前要销毁的`Activity`在前台的情况分析，此时会将这个`Activity`添加到`stop`列表中，并将状态设置为`STOPPING`，之后返回到`ActivityStack.completePauseLocked`方法中，继续执行`resumeNext`工作
+
+在`resumeNext`中会调用`RootWindowContainer.resumeFocusedStacksTopActivities`方法恢复栈顶`Activity`，由于这个方法之前已经在 
+[Android源码分析 - Activity启动流程（上）](https://juejin.cn/post/7130182223231188999#heading-6) 中分析过了，这里就不再赘述了，我们还是将目光放在销毁流程上
+
+通过之前的文章，我们知道恢复`Activity`会调用到`ActivityThread.handleResumeActivity`方法，而当`Activity`恢复完毕后，此方法最后一行会向`MessageQueue`添加一个`IdleHandler`，关于`IdleHandler`这里就不再介绍了，这是每位`Android`开发都应该了解的东西
+
+```java
+public void handleResumeActivity(IBinder token, boolean finalStateRequest, boolean isForward,
+        String reason) {
+    ...
+    r.nextIdle = mNewActivities;
+    mNewActivities = r;
+    Looper.myQueue().addIdleHandler(new Idler());
+}
+```
+
+这里的`Idler`是`ActivityThread`的一个内部类
+
+```java
+private class Idler implements MessageQueue.IdleHandler {
+    @Override
+    public final boolean queueIdle() {
+        ActivityClientRecord a = mNewActivities;
+        ...
+        if (a != null) {
+            mNewActivities = null;
+            IActivityTaskManager am = ActivityTaskManager.getService();
+            ActivityClientRecord prev;
+            //遍历整条ActivityClientRecord.nextIdle链
+            //依次调用ATMS.activityIdle检查Activity是否需要stop或destroy
+            do {
+                if (a.activity != null && !a.activity.mFinished) {
+                    try {
+                        am.activityIdle(a.token, a.createdConfig, stopProfiling);
+                        a.createdConfig = null;
+                    } catch (RemoteException ex) {
+                        throw ex.rethrowFromSystemServer();
+                    }
+                }
+                prev = a;
+                a = a.nextIdle;
+                prev.nextIdle = null;
+            } while (a != null);
+        }
+        ...
+        return false;
+    }
+}
+```
+
+这里会遍历整个进程内所有的`ActivityClientRecord`，并依次调用`ATMS.activityIdle`方法
+
+```java
+public final void activityIdle(IBinder token, Configuration config, boolean stopProfiling) {
+    ...
+    final ActivityRecord r = ActivityRecord.forTokenLocked(token);
+    if (r == null) {
+        return;
+    }
+    mStackSupervisor.activityIdleInternal(r, false /* fromTimeout */,
+            false /* processPausingActivities */, config);
+    ...
+}
+```
+
+从`ActivityRecord.Token`获取到`ActivityRecord`，接着调用`ActivityStackSupervisor.activityIdleInternal`方法
+
+```java
+void activityIdleInternal(ActivityRecord r, boolean fromTimeout,
+        boolean processPausingActivities, Configuration config) {
+    ...
+    // Atomically retrieve all of the other things to do.
+    processStoppingAndFinishingActivities(r, processPausingActivities, "idle");
+    ...
+}
+```
+
+这里我们只需要重点关注`processStoppingAndFinishingActivities`这一个方法，从方法名我们也能看出来，它是用来处理`Activity` `stop`或`destroy`的
+
+```java
+/**
+ * Processes the activities to be stopped or destroyed. This should be called when the resumed
+ * activities are idle or drawn.
+ */
+private void processStoppingAndFinishingActivities(ActivityRecord launchedActivity,
+        boolean processPausingActivities, String reason) {
+    // Stop any activities that are scheduled to do so but have been waiting for the transition
+    // animation to finish.
+    ArrayList<ActivityRecord> readyToStopActivities = null;
+    for (int i = mStoppingActivities.size() - 1; i >= 0; --i) {
+        final ActivityRecord s = mStoppingActivities.get(i);
+        final boolean animating = s.isAnimating(TRANSITION | PARENTS,
+                ANIMATION_TYPE_APP_TRANSITION | ANIMATION_TYPE_RECENTS);
+        //不在动画中或者ATMS服务正在关闭
+        if (!animating || mService.mShuttingDown) {
+            //跳过正在pause的Activitiy
+            if (!processPausingActivities && s.isState(PAUSING)) {
+                // Defer processing pausing activities in this iteration and reschedule
+                // a delayed idle to reprocess it again
+                removeIdleTimeoutForActivity(launchedActivity);
+                scheduleIdleTimeout(launchedActivity);
+                continue;
+            }
+
+            if (readyToStopActivities == null) {
+                readyToStopActivities = new ArrayList<>();
+            }
+            //将准备好stop的Activitiy加入列表中
+            readyToStopActivities.add(s);
+
+            mStoppingActivities.remove(i);
+        }
+    }
+
+    final int numReadyStops = readyToStopActivities == null ? 0 : readyToStopActivities.size();
+    for (int i = 0; i < numReadyStops; i++) {
+        final ActivityRecord r = readyToStopActivities.get(i);
+        //Activity是否在任务栈中
+        if (r.isInHistory()) {
+            if (r.finishing) {
+                // TODO(b/137329632): Wait for idle of the right activity, not just any.
+                //被标记为finishing，尝试销毁Activity
+                r.destroyIfPossible(reason);
+            } else {
+                //否则仅仅只是stop Activity
+                r.stopIfPossible();
+            }
+        }
+    }
+
+    final int numFinishingActivities = mFinishingActivities.size();
+    if (numFinishingActivities == 0) {
+        return;
+    }
+
+    // Finish any activities that are scheduled to do so but have been waiting for the next one
+    // to start.
+    final ArrayList<ActivityRecord> finishingActivities = new ArrayList<>(mFinishingActivities);
+    mFinishingActivities.clear();
+    for (int i = 0; i < numFinishingActivities; i++) {
+        final ActivityRecord r = finishingActivities.get(i);
+        if (r.isInHistory()) {
+            //立刻销毁Activity
+            r.destroyImmediately(true /* removeFromApp */, "finish-" + reason);
+        }
+    }
+}
+```
