@@ -552,6 +552,8 @@ public void execute(ClientTransactionHandler client, IBinder token,
 
 `ClientTransactionHandler`这个我们之前说过，这是一个抽象类，被`ActivityThread`继承实现，所以这里实际上就是调用`ActivityThread.handlePauseActivity`方法
 
+# handlePauseActivity
+
 ```java
 public void handlePauseActivity(IBinder token, boolean finished, boolean userLeaving,
         int configChanges, PendingTransactionActions pendingActions, String reason) {
@@ -713,6 +715,8 @@ final void performPause() {
 }
 ```
 
+执行`onPause`回调
+
 ```java
 protected void onPause() {
     //分发Paused事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPaused回调
@@ -731,7 +735,7 @@ protected void onPause() {
     }
     //内容捕获服务
     notifyContentCaptureManagerIfNeeded(CONTENT_CAPTURE_PAUSE);
-    //确保super.onPause被执行
+    //super.onPause标注为已被执行
     mCalled = true;
 }
 ```
@@ -996,8 +1000,7 @@ private class Idler implements MessageQueue.IdleHandler {
             mNewActivities = null;
             IActivityTaskManager am = ActivityTaskManager.getService();
             ActivityClientRecord prev;
-            //遍历整条ActivityClientRecord.nextIdle链
-            //依次调用ATMS.activityIdle检查Activity是否需要stop或destroy
+            //遍历整条ActivityClientRecord.nextIdle链，依次调用ATMS.activityIdle
             do {
                 if (a.activity != null && !a.activity.mFinished) {
                     try {
@@ -1110,9 +1113,601 @@ private void processStoppingAndFinishingActivities(ActivityRecord launchedActivi
     for (int i = 0; i < numFinishingActivities; i++) {
         final ActivityRecord r = finishingActivities.get(i);
         if (r.isInHistory()) {
-            //立刻销毁Activity
+            //立刻执行Activity的销毁流程
             r.destroyImmediately(true /* removeFromApp */, "finish-" + reason);
         }
     }
 }
 ```
+
+对于被标记为`finishing`的`Activity`，调用`destroyIfPossible`方法销毁
+
+```java
+/**
+ * Destroy and cleanup the activity both on client and server if possible. If activity is the
+ * last one left on display with home stack and there is no other running activity - delay
+ * destroying it until the next one starts.
+ */
+boolean destroyIfPossible(String reason) {
+    //设置状态
+    setState(FINISHING, "destroyIfPossible");
+
+    // Make sure the record is cleaned out of other places.
+    //确保此Activity已从待stop列表中移除
+    mStackSupervisor.mStoppingActivities.remove(this);
+
+    final ActivityStack stack = getRootTask();
+    final TaskDisplayArea taskDisplayArea = getDisplayArea();
+    final ActivityRecord next = taskDisplayArea.topRunningActivity();
+    final boolean isLastStackOverEmptyHome =
+            next == null && stack.isFocusedStackOnDisplay()
+                    && taskDisplayArea.getOrCreateRootHomeTask() != null;
+    if (isLastStackOverEmptyHome) {
+        // Don't destroy activity immediately if this is the last activity on the display and
+        // the display contains home stack. Although there is no next activity at the moment,
+        // another home activity should be started later. Keep this activity alive until next
+        // home activity is resumed. This way the user won't see a temporary black screen.
+        //如果Home栈存在且这是当前焦点栈中最后一个Activity，则不要立即销毁它
+        //将此Activity添加到待finish列表中，等待空闲时执行finish
+        addToFinishingAndWaitForIdle();
+        return false;
+    }
+    //设置finishing标记（之前设过了，这里是重复设置）
+    makeFinishingLocked();
+
+    //立刻执行Activity的销毁流程
+    final boolean activityRemoved = destroyImmediately(true /* removeFromApp */,
+            "finish-imm:" + reason);
+
+    // If the display does not have running activity, the configuration may need to be
+    // updated for restoring original orientation of the display.
+    //更新可见性和屏幕显示方向
+    if (next == null) {
+        mRootWindowContainer.ensureVisibilityAndConfig(next, getDisplayId(),
+                false /* markFrozenIfConfigChanged */, true /* deferResume */);
+    }
+    //更新恢复栈顶Activity
+    if (activityRemoved) {
+        mRootWindowContainer.resumeFocusedStacksTopActivities();
+    }
+
+    return activityRemoved;
+}
+```
+
+这里做了最后的一些判断，然后调用`destroyImmediately`方法，立刻执行Activity的销毁流程（这里和上一个方法`processStoppingAndFinishingActivities`中，待`finish`列表的处理是一样的）
+
+```java
+/**
+ * Destroy the current CLIENT SIDE instance of an activity. This may be called both when
+ * actually finishing an activity, or when performing a configuration switch where we destroy
+ * the current client-side object but then create a new client-side object for this same
+ * HistoryRecord.
+ * Normally the server-side record will be removed when the client reports back after
+ * destruction. If, however, at this point there is no client process attached, the record will
+ * be removed immediately.
+ *
+ * @return {@code true} if activity was immediately removed from history, {@code false}
+ * otherwise.
+ */
+boolean destroyImmediately(boolean removeFromApp, String reason) {
+    //已经被销毁或正在被销毁，直接返回
+    if (isState(DESTROYING, DESTROYED)) {
+        return false;
+    }
+
+    boolean removedFromHistory = false;
+
+    //清理工作
+    cleanUp(false /* cleanServices */, false /* setState */);
+
+    if (hasProcess()) {
+        //清理更新工作
+        if (removeFromApp) {
+            app.removeActivity(this);
+            if (!app.hasActivities()) {
+                mAtmService.clearHeavyWeightProcessIfEquals(app);
+                // Update any services we are bound to that might care about whether
+                // their client may have activities.
+                // No longer have activities, so update LRU list and oom adj.
+                //更新进程信息
+                app.updateProcessInfo(true /* updateServiceConnectionActivities */,
+                        false /* activityChange */, true /* updateOomAdj */,
+                        false /* addPendingTopUid */);
+            }
+        }
+
+        boolean skipDestroy = false;
+
+        try {
+            //调度销毁生命周期事务
+            mAtmService.getLifecycleManager().scheduleTransaction(app.getThread(), appToken,
+                    DestroyActivityItem.obtain(finishing, configChangeFlags));
+        } catch (Exception e) {
+            // We can just ignore exceptions here...  if the process has crashed, our death
+            // notification will clean things up.
+            if (finishing) {
+                //从历史任务中移除
+                removeFromHistory(reason + " exceptionInScheduleDestroy");
+                removedFromHistory = true;
+                skipDestroy = true;
+            }
+        }
+
+        nowVisible = false;
+
+        // If the activity is finishing, we need to wait on removing it from the list to give it
+        // a chance to do its cleanup.  During that time it may make calls back with its token
+        // so we need to be able to find it on the list and so we don't want to remove it from
+        // the list yet.  Otherwise, we can just immediately put it in the destroyed state since
+        // we are not removing it from the list.
+        if (finishing && !skipDestroy) {
+            //设置状态
+            setState(DESTROYING,
+                    "destroyActivityLocked. finishing and not skipping destroy");
+            //设置销毁超时回调
+            mAtmService.mH.postDelayed(mDestroyTimeoutRunnable, DESTROY_TIMEOUT);
+        } else {
+            //设置状态
+            setState(DESTROYED,
+                    "destroyActivityLocked. not finishing or skipping destroy");
+            app = null;
+        }
+    } else {
+        // Remove this record from the history.
+        if (finishing) {
+            //没有绑定进程，从历史任务中移除
+            removeFromHistory(reason + " hadNoApp");
+            removedFromHistory = true;
+        } else {
+            //没有绑定进程且不在finishing中，直接设置状态为已被销毁
+            setState(DESTROYED, "destroyActivityLocked. not finishing and had no app");
+        }
+    }
+
+    configChangeFlags = 0;
+
+    return removedFromHistory;
+}
+```
+
+# scheduleTransaction
+
+这个方法做了一些清理工作，重头戏在于调用了`ClientLifecycleManager.scheduleTransaction`方法调度销毁生命周期事务，接下来我们就重点分析这个事务的执行路径
+
+`scheduleTransaction`的调用链路我们在 [Android源码分析 - Activity启动流程（下）](https://juejin.cn/post/7195458962328649788#heading-5) 中已经分析过了，这里我就简单的标注一下流程：
+
+`ClientLifecycleManager.scheduleTransaction` ->
+`ClientTransaction.schedule` ->
+`ActivityThread.scheduleTransaction` ->
+`ClientTransaction.preExecute` ->
+`ActivityLifecycleItem.preExecute`->
+`ActivityThread.sendMessage(ActivityThread.H.EXECUTE_TRANSACTION, transaction)` ->
+`TransactionExecutor.execute` -> 
+`TransactionExecutor.executeCallbacks` -> 
+`TransactionExecutor.executeLifecycleState` ->
+`TransactionExecutor.cycleToPath` ->
+`ActivityLifecycleItem.execute` ->
+`ActivityLifecycleItem.postExecute`
+
+这里的链路基本上和`Activity`启动事务链路相差无几，甚至更短了（`Activity`销毁事务没有添加`callback`），所以没看过我上篇文章的强烈推荐去看一下，这里我就不再做分析了
+
+我们从`TransactionExecutor.cycleToPath`开始，之前我们分析过，我们在事务中设置的`ActivityLifecycleItem`代表了`Activity`最终需要到达执行的生命周期，而中间的那些过渡生命周期就由`cycleToPath`方法推进执行，我们目前的生命周期状态为`ON_PAUSE`，而我们的目标生命周期为`ON_DESTROY`，中间还夹着一个`ON_STOP`，所以这个方法会帮我们执行`ClientTransactionHandler.handleStopActivity`方法，也就是`ActivityThread.handleStopActivity`方法
+
+# handleStopActivity
+
+```java
+public void handleStopActivity(IBinder token, int configChanges,
+        PendingTransactionActions pendingActions, boolean finalStateRequest /* false */, String reason) {
+    final ActivityClientRecord r = mActivities.get(token);
+    r.activity.mConfigChangeFlags |= configChanges;
+
+    final StopInfo stopInfo = new StopInfo();
+    //执行onStop生命周期
+    performStopActivityInner(r, stopInfo, true /* saveState */, finalStateRequest,
+            reason);
+
+    //更新可见性
+    updateVisibility(r, false);
+
+    // Make sure any pending writes are now committed.
+    //确保所有全局任务都被处理完成
+    if (!r.isPreHoneycomb()) {
+        QueuedWork.waitToFinish();
+    }
+
+    //记录Stop信息（不过在后续销毁链路中似乎并没有被用到）
+    stopInfo.setActivity(r);
+    stopInfo.setState(r.state);
+    stopInfo.setPersistentState(r.persistentState);
+    pendingActions.setStopInfo(stopInfo);
+    mSomeActivitiesChanged = true;
+}
+```
+
+接下来的路径就和其他生命周期差不多了，大部分内容我都用注释标注了，大家顺着往下看就行了
+
+```java
+/**
+ * Core implementation of stopping an activity.
+ * @param r Target activity client record.
+ * @param info Action that will report activity stop to server.
+ * @param saveState Flag indicating whether the activity state should be saved.
+ * @param finalStateRequest Flag indicating if this call is handling final lifecycle state
+ *                          request for a transaction.
+ * @param reason Reason for performing this operation.
+ */
+private void performStopActivityInner(ActivityClientRecord r, StopInfo info,
+        boolean saveState, boolean finalStateRequest /* false */, String reason) {
+    if (r != null) {
+        ... //异常状态处理
+
+        // One must first be paused before stopped...
+        //如果没有被暂停则先执行pause生命周期
+        performPauseActivityIfNeeded(r, reason);
+
+        ... //设置描述（Activity.onCreateDescription）
+
+        //回调Activity的onStop方法
+        callActivityOnStop(r, saveState, reason);
+    }
+}
+```
+
+```java
+/**
+ * Calls {@link Activity#onStop()} and {@link Activity#onSaveInstanceState(Bundle)}, and updates
+ * the client record's state.
+ * All calls to stop an activity must be done through this method to make sure that
+ * {@link Activity#onSaveInstanceState(Bundle)} is also executed in the same call.
+ */
+private void callActivityOnStop(ActivityClientRecord r, boolean saveState, String reason) {
+    // Before P onSaveInstanceState was called before onStop, starting with P it's
+    // called after. Before Honeycomb state was always saved before onPause.
+    //这里shouldSaveState为true，因为activity.mFinished早在performPauseActivity的时候就被设为了true
+    final boolean shouldSaveState = saveState && !r.activity.mFinished && r.state == null
+            && !r.isPreHoneycomb();
+    //targetSdkVersion为Android P (Android 9)之前
+    final boolean isPreP = r.isPreP();
+    if (shouldSaveState && isPreP) {
+        callActivityOnSaveInstanceState(r);
+    }
+
+    try {
+        //执行stop生命周期
+        r.activity.performStop(r.mPreserveWindow, reason);
+    } catch (SuperNotCalledException e) {
+        throw e;
+    } catch (Exception e) {
+        ...
+    }
+    //设置生命周期状态
+    r.setState(ON_STOP);
+
+    if (shouldSaveState && !isPreP) {
+        callActivityOnSaveInstanceState(r);
+    }
+}
+```
+
+```java
+final void performStop(boolean preserveWindow, String reason) {
+    mDoReportFullyDrawn = false;
+    //Loader相关，详见https://developer.android.com/guide/components/loaders
+    mFragments.doLoaderStop(mChangingConfigurations /*retain*/);
+
+    // Disallow entering picture-in-picture after the activity has been stopped
+    //stop后禁用画中画
+    mCanEnterPictureInPicture = false;
+
+    if (!mStopped) {
+        //分发PreStopped事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPreStopped回调
+        dispatchActivityPreStopped();
+        //关闭所有子窗口
+        if (mWindow != null) {
+            mWindow.closeAllPanels();
+        }
+
+        // If we're preserving the window, don't setStoppedState to true, since we
+        // need the window started immediately again. Stopping the window will
+        // destroys hardware resources and causes flicker.
+        if (!preserveWindow && mToken != null && mParent == null) {
+            //设置停止状态，释放硬件资源，销毁Surface
+            WindowManagerGlobal.getInstance().setStoppedState(mToken, true);
+        }
+
+        //FragmentManager分发stop状态
+        mFragments.dispatchStop();
+
+        mCalled = false;
+        //执行onStop回调
+        mInstrumentation.callActivityOnStop(this);
+        EventLogTags.writeWmOnStopCalled(mIdent, getComponentName().getClassName(), reason);
+        if (!mCalled) {
+            //必须要调用super.onStop方法
+            throw new SuperNotCalledException(
+                "Activity " + mComponent.toShortString() +
+                " did not call through to super.onStop()");
+        }
+
+        //释放Cursors
+        synchronized (mManagedCursors) {
+            final int N = mManagedCursors.size();
+            for (int i=0; i<N; i++) {
+                ManagedCursor mc = mManagedCursors.get(i);
+                if (!mc.mReleased) {
+                    mc.mCursor.deactivate();
+                    mc.mReleased = true;
+                }
+            }
+        }
+
+        mStopped = true;
+        //分发PostStopped事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPostStopped回调
+        dispatchActivityPostStopped();
+    }
+    mResumed = false;
+}
+```
+
+通过`Instrumentation`执行`onStop`回调
+
+```java
+protected void onStop() {
+    //ActionBar动画
+    if (mActionBar != null) mActionBar.setShowHideAnimationEnabled(false);
+    //共享元素动画
+    mActivityTransitionState.onStop();
+    //分发PostStopped事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPostStopped回调
+    dispatchActivityStopped();
+    mTranslucentCallback = null;
+    //super.onStop标注为已被执行
+    mCalled = true;
+
+    ... //自动填充相关
+
+    mEnterAnimationComplete = false;
+}
+```
+
+这样，一整个`onStop`生命周期就执行完成了，最后还剩下个`onDestroy`，根据之前写的事务调度链路，现在应该走到了`DestroyActivityItem.execute`方法
+
+```java
+public void execute(ClientTransactionHandler client, IBinder token,
+        PendingTransactionActions pendingActions) {
+    client.handleDestroyActivity(token, mFinished, mConfigChanges,
+            false /* getNonConfigInstance */, "DestroyActivityItem");
+}
+```
+
+可以看到，实际上就直接调用了`ActivityThread.handleDestroyActivity`方法
+
+# handleDestroyActivity
+
+```java
+public void handleDestroyActivity(IBinder token, boolean finishing, int configChanges,
+        boolean getNonConfigInstance, String reason) {
+    //执行onDestroy生命周期
+    ActivityClientRecord r = performDestroyActivity(token, finishing,
+            configChanges, getNonConfigInstance, reason);
+    if (r != null) {
+        //清理之前设置的延时移除的window
+        cleanUpPendingRemoveWindows(r, finishing);
+        WindowManager wm = r.activity.getWindowManager();
+        View v = r.activity.mDecor;
+        if (v != null) {
+            if (r.activity.mVisibleFromServer) {
+                mNumVisibleActivities--;
+            }
+            IBinder wtoken = v.getWindowToken();
+            if (r.activity.mWindowAdded) {
+                if (r.mPreserveWindow) {
+                    // Hold off on removing this until the new activity's
+                    // window is being added.
+                    r.mPendingRemoveWindow = r.window;
+                    r.mPendingRemoveWindowManager = wm;
+                    // We can only keep the part of the view hierarchy that we control,
+                    // everything else must be removed, because it might not be able to
+                    // behave properly when activity is relaunching.
+                    //从DecorView中移除ContentView
+                    r.window.clearContentView();
+                } else {
+                    //立刻执行View的移除操作，释放硬件资源，销毁Surface，回调View.onDetachedFromWindow
+                    wm.removeViewImmediate(v);
+                }
+            }
+            if (wtoken != null && r.mPendingRemoveWindow == null) {
+                //移除指定Window下的所有rootView
+                WindowManagerGlobal.getInstance().closeAll(wtoken,
+                        r.activity.getClass().getName(), "Activity");
+            } else if (r.mPendingRemoveWindow != null) {
+                // We're preserving only one window, others should be closed so app views
+                // will be detached before the final tear down. It should be done now because
+                // some components (e.g. WebView) rely on detach callbacks to perform receiver
+                // unregister and other cleanup.
+                //移除指定Window下除了当前DecorView以外的所有rootView
+                WindowManagerGlobal.getInstance().closeAllExceptView(token, v,
+                        r.activity.getClass().getName(), "Activity");
+            }
+            r.activity.mDecor = null;
+        }
+        if (r.mPendingRemoveWindow == null) {
+            // If we are delaying the removal of the activity window, then
+            // we can't clean up all windows here.  Note that we can't do
+            // so later either, which means any windows that aren't closed
+            // by the app will leak.  Well we try to warning them a lot
+            // about leaking windows, because that is a bug, so if they are
+            // using this recreate facility then they get to live with leaks.
+            WindowManagerGlobal.getInstance().closeAll(token,
+                    r.activity.getClass().getName(), "Activity");
+        }
+
+        // Mocked out contexts won't be participating in the normal
+        // process lifecycle, but if we're running with a proper
+        // ApplicationContext we need to have it tear down things
+        // cleanly.
+        //清理Context
+        Context c = r.activity.getBaseContext();
+        if (c instanceof ContextImpl) {
+            ((ContextImpl) c).scheduleFinalCleanup(
+                    r.activity.getClass().getName(), "Activity");
+        }
+    }
+    if (finishing) {
+        try {
+            //处理一些销毁后的事项，移除超时回调等
+            ActivityTaskManager.getService().activityDestroyed(token);
+        } catch (RemoteException ex) {
+            throw ex.rethrowFromSystemServer();
+        }
+    }
+    mSomeActivitiesChanged = true;
+}
+```
+
+`Window`这块的处理我目前也不太了解，等以后我学习了`WMS`那块再补吧
+
+其他的和之前的套路一样，调用`performDestroyActivity`方法执行销毁`Activity`
+
+```java
+/** Core implementation of activity destroy call. */
+ActivityClientRecord performDestroyActivity(IBinder token, boolean finishing,
+        int configChanges, boolean getNonConfigInstance, String reason) {
+    ActivityClientRecord r = mActivities.get(token);
+    Class<? extends Activity> activityClass = null;
+    if (r != null) {
+        activityClass = r.activity.getClass();
+        r.activity.mConfigChangeFlags |= configChanges;
+        if (finishing) {
+            r.activity.mFinished = true;
+        }
+
+        //如果没有被暂停则先执行pause生命周期
+        performPauseActivityIfNeeded(r, "destroy");
+
+        //如果没有被停职则先执行stop生命周期
+        if (!r.stopped) {
+            callActivityOnStop(r, false /* saveState */, "destroy");
+        }
+        if (getNonConfigInstance) {
+            ... //getNonConfigInstance为false，这里不执行
+        }
+        try {
+            r.activity.mCalled = false;
+            //执行onDestroy回调
+            mInstrumentation.callActivityOnDestroy(r.activity);
+            //必须要调用super.onDestroy方法
+            if (!r.activity.mCalled) {
+                throw new SuperNotCalledException(
+                    "Activity " + safeToComponentShortString(r.intent) +
+                    " did not call through to super.onDestroy()");
+            }
+            //关闭所有子窗口
+            if (r.window != null) {
+                r.window.closeAllPanels();
+            }
+        } catch (SuperNotCalledException e) {
+            throw e;
+        } catch (Exception e) {
+            ...
+        }
+        //设置生命周期状态
+        r.setState(ON_DESTROY);
+    }
+    //空闲时清理资源
+    schedulePurgeIdler();
+    // updatePendingActivityConfiguration() reads from mActivities to update
+    // ActivityClientRecord which runs in a different thread. Protect modifications to
+    // mActivities to avoid race.
+    synchronized (mResourcesManager) {
+        mActivities.remove(token);
+    }
+    //严格模式更新Activity计数器，与实际Activity数量对比，判断是否产生内存泄漏
+    StrictMode.decrementExpectedActivityCount(activityClass);
+    return r;
+}
+```
+
+通过`Instrumentation`调用`Activity.performDestroy`方法
+
+```java
+final void performDestroy() {
+    //分发PreDestroyed事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPreDestroyed回调
+    dispatchActivityPreDestroyed();
+    mDestroyed = true;
+    mWindow.destroy();
+    mFragments.dispatchDestroy();
+    onDestroy();
+    EventLogTags.writeWmOnDestroyCalled(mIdent, getComponentName().getClassName(),
+            "performDestroy");
+    mFragments.doLoaderDestroy();
+    if (mVoiceInteractor != null) {
+        mVoiceInteractor.detachActivity();
+    }
+    //分发PostDestroyed事件，执行所有注册的ActivityLifecycleCallbacks的onActivityPostDestroyed回调
+    dispatchActivityPostDestroyed();
+}
+```
+
+```java
+protected void onDestroy() {
+    //super.onDestroy标注为已被执行
+    mCalled = true;
+
+    ... //自动填充相关
+
+    // dismiss any dialogs we are managing.
+    //关闭所有被管理的Dialog
+    if (mManagedDialogs != null) {
+        final int numDialogs = mManagedDialogs.size();
+        for (int i = 0; i < numDialogs; i++) {
+            final ManagedDialog md = mManagedDialogs.valueAt(i);
+            if (md.mDialog.isShowing()) {
+                md.mDialog.dismiss();
+            }
+        }
+        mManagedDialogs = null;
+    }
+
+    // close any cursors we are managing.
+    //关闭所有被管理的Cursor
+    synchronized (mManagedCursors) {
+        int numCursors = mManagedCursors.size();
+        for (int i = 0; i < numCursors; i++) {
+            ManagedCursor c = mManagedCursors.get(i);
+            if (c != null) {
+                c.mCursor.close();
+            }
+        }
+        mManagedCursors.clear();
+    }
+
+    // Close any open search dialog
+    //关闭系统搜索服务的弹窗
+    if (mSearchManager != null) {
+        mSearchManager.stopSearch();
+    }
+
+    if (mActionBar != null) {
+        mActionBar.onDestroy();
+    }
+
+    //分发Destroyed事件，执行所有注册的ActivityLifecycleCallbacks的onActivityDestroyed回调
+    dispatchActivityDestroyed();
+
+    //内容捕获服务
+    notifyContentCaptureManagerIfNeeded(CONTENT_CAPTURE_STOP);
+}
+```
+
+`DestroyActivityItem`没有重写`postExecute`方法，所以到此为止，`Activity`整个销毁流程就结束了
+
+# Tips
+
+我们通过本篇文章的分析，可以发现，触发`Activity`销毁后，`onStop`和`onDestroy`这两个生命周期回调的触发时机是不确定的，如果有需求需要在确定`Activity`要被销毁后立刻执行，我们可以在`onPause`回调中调用`Activity.isFinishing`方法判断`mFinished`标志是否被置`true`，如果为`true`则可以判定这个`Activity`将被销毁
+
+# 结尾
+
+至此，`Activity`的启动流程和销毁流程我们都分析完了，后面应该暂时不会再写`Activity`相关的源码分析了
+
+之后的一段时间，我可能会将我的精力投入到`AIGC`的技术调研中，`Android源码分析`这一系列的后续更新可能会放慢，希望大家多多谅解
