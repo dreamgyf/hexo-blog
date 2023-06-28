@@ -32,7 +32,7 @@ fsutil.exe file setCaseSensitiveInfo <path> enable
 
 # 重新挂载磁盘
 
-如果你的`AOSP`源码放在了`Windows`驱动器上，比如说 `F:\aosp` ，在`WSL`中的路径应该是 `/mnt/f/aosp` 这种形式的，此时需要以`drvfs`文件系统重新挂载盘符，否则编译到中途会保存：
+如果你的`AOSP`源码放在了`Windows`驱动器上，比如说 `F:\aosp` ，在`WSL`中的路径应该是 `/mnt/f/aosp` 这种形式的，此时需要以`drvfs`文件系统重新挂载盘符，否则编译到中途会报错：
 
 ```shell
 sudo umount /mnt/f
