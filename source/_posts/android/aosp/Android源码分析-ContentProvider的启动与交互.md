@@ -621,8 +621,8 @@ private ContentProviderHolder getContentProviderImpl(IApplicationThread caller,
                     ProcessRecord proc = getProcessRecordLocked(
                             cpi.processName, cpr.appInfo.uid, false);
                     if (proc != null && proc.thread != null && !proc.killed) { //进程存活
-                        //将ContentProvider记录保存到进程发布ContentProvider中
                         if (!proc.pubProviders.containsKey(cpi.name)) {
+                            //将ContentProviderRecord保存到进程已发布ContentProvider列表中
                             proc.pubProviders.put(cpi.name, cpr);
                             try {
                                 //调度ActivityThread直接安装ContentProvider
@@ -673,13 +673,13 @@ private ContentProviderHolder getContentProviderImpl(IApplicationThread caller,
 }
 ```
 
-第三部分，如果目标`ContentProvider`未在运行，先通过`PMS`获取`ContentProvider`信息，接着尝试通过Class（`android:name`属性）获取`ContentProviderRecord`，如果获取不到，说明这个`ContentProvider`是第一次运行（开机后），这种情况下需要新建`ContentProviderRecorder`，如果获取到了，但是其所在进程被标记为正在死亡，此时同样需要新建`ContentProviderRecorder`，不要复用旧的`ContentProviderRecord`，避免出现预期之外的问题
+第三部分，如果目标`ContentProvider`未在运行，先通过`PMS`获取`ContentProvider`信息，接着尝试通过Class（`android:name`属性）获取`ContentProviderRecord`，如果获取不到，说明这个`ContentProvider`是第一次运行（开机后），这种情况下需要新建`ContentProviderRecord`，如果获取到了，但是其所在进程被标记为正在死亡，此时同样需要新建`ContentProviderRecord`，不要复用旧的`ContentProviderRecord`，避免出现预期之外的问题
 
 接下来同样检查目标`ContentProvider`是否可以在调用者进程中直接运行，如果可以直接返回一个新的`ContentProviderHolder`让调用者进程自己启动获取`ContentProvider`
 
-接着检查正在启动中的`ContentProvider`列表，如果不在列表中，我们需要手动启动它，此时又有两种情况：
+接着检查正在启动中的`ContentProvider`列表，如果不在列表中，我们可能需要手动启动它，此时又有两种情况：
 
-1. `ContentProvider`所在进程已启动：调用目标进程中的`ApplicationThread.scheduleInstallProvider`方法安装启动`ContentProvider`
+1. `ContentProvider`所在进程已启动：如果进程已发布`ContentProvider`列表中不包含这个`ContentProviderRecord`，则将其添加到列表中，然后调用目标进程中的`ApplicationThread.scheduleInstallProvider`方法安装启动`ContentProvider`
 2. `ContentProvider`所在进程未启动：启动目标进程，目标进程启动过程中会自动安装启动`ContentProvider`（`ActivityThread.handleBindApplication`方法中）
 
 最后更新`mProviderMap`，获取`ContentProviderConnection`连接并更新引用计数
@@ -742,3 +742,298 @@ private ContentProviderHolder getContentProviderImpl(IApplicationThread caller,
 由于这个方法同时包含了启动安装本地`ContentProvider`和获取安装远程`ContentProvider`的逻辑，所以放到后面`启动ContentProvider`章节里一起分析
 
 # 启动ContentProvider
+
+从前面的章节`获取ContentProvider`中，我们已经归纳出`ContentProvider`的启动分为两种情况，接着我们就来分析在这两种情况下，`ContentProvider`的启动路径
+
+## 进程已启动
+
+在进程已启动的情况下，如果进程已发布`ContentProvider`列表中不包含这个`ContentProviderRecord`，则将其添加到列表中，然后调用目标进程中的`ApplicationThread.scheduleInstallProvider`方法安装启动`ContentProvider`
+
+`ApplicationThread.scheduleInstallProvider`会通过`Hander`发送一条`what`值为`H.INSTALL_PROVIDER`的消息，我们根据这个`what`值搜索，发现会走到`ActivityThread.handleInstallProvider`方法中，在这个方法内又会调用`installContentProviders`方法安装启动`ContentProvider`
+
+## 进程未启动
+
+在进程未启动的情况下，直接启动目标进程，在之前的文章 [Android源码分析 - Activity启动流程（中）](https://juejin.cn/post/7172464885492613128#heading-7) 里，我们分析了App的启动流程，其中有两个地方对启动`ContentProvider`至关重要
+
+### AMS.attachApplicationLocked
+
+在这个方法中会调用`generateApplicationProvidersLocked`方法
+
+```java
+private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
+        int pid, int callingUid, long startSeq) {
+    ...
+    //normalMode一般情况下均为true
+    List<ProviderInfo> providers = normalMode ? generateApplicationProvidersLocked(app) : null;
+    ...
+}
+
+private final List<ProviderInfo> generateApplicationProvidersLocked(ProcessRecord app) {
+    List<ProviderInfo> providers = null;
+    try {
+        //通过PMS获取App中同一个进程内的所有的ContentProvider组件信息
+        providers = AppGlobals.getPackageManager()
+                .queryContentProviders(app.processName, app.uid,
+                        STOCK_PM_FLAGS | PackageManager.GET_URI_PERMISSION_PATTERNS
+                                | MATCH_DEBUG_TRIAGED_MISSING, /*metadastaKey=*/ null)
+                .getList();
+    } catch (RemoteException ex) {
+    }
+    int userId = app.userId;
+    if (providers != null) {
+        int N = providers.size();
+        //有必要的情况下进行Map扩容
+        app.pubProviders.ensureCapacity(N + app.pubProviders.size());
+        for (int i=0; i<N; i++) {
+            // TODO: keep logic in sync with installEncryptionUnawareProviders
+            ProviderInfo cpi =
+                (ProviderInfo)providers.get(i);
+            //对于单例ContentProvider，需要在默认用户中启动，如果不是默认用户的话则直接将其丢弃掉，不启动
+            boolean singleton = isSingleton(cpi.processName, cpi.applicationInfo,
+                    cpi.name, cpi.flags);
+            if (singleton && UserHandle.getUserId(app.uid) != UserHandle.USER_SYSTEM) {
+                // This is a singleton provider, but a user besides the
+                // default user is asking to initialize a process it runs
+                // in...  well, no, it doesn't actually run in this process,
+                // it runs in the process of the default user.  Get rid of it.
+                providers.remove(i);
+                N--;
+                i--;
+                continue;
+            }
+
+            ComponentName comp = new ComponentName(cpi.packageName, cpi.name);
+            ContentProviderRecord cpr = mProviderMap.getProviderByClass(comp, userId);
+            if (cpr == null) {
+                //新建ContentProviderRecord并将其加入到缓存中
+                cpr = new ContentProviderRecord(this, cpi, app.info, comp, singleton);
+                mProviderMap.putProviderByClass(comp, cpr);
+            }
+            //将ContentProviderRecord保存到进程已发布ContentProvider列表中
+            app.pubProviders.put(cpi.name, cpr);
+            if (!cpi.multiprocess || !"android".equals(cpi.packageName)) {
+                // Don't add this if it is a platform component that is marked
+                // to run in multiple processes, because this is actually
+                // part of the framework so doesn't make sense to track as a
+                // separate apk in the process.
+                //将App添加至进程中运行的包列表中
+                app.addPackage(cpi.applicationInfo.packageName,
+                        cpi.applicationInfo.longVersionCode, mProcessStats);
+            }
+            notifyPackageUse(cpi.applicationInfo.packageName,
+                                PackageManager.NOTIFY_PACKAGE_USE_CONTENT_PROVIDER);
+        }
+    }
+    return providers;
+}
+```
+
+这个方法主要是获取需要启动的`ContentProvider`的`ContentProviderRecord`，如果是第一次启动这个`ContentProvider`则需要新建一个`ContentProviderRecord`并将其存入缓存，然后将其保存到进程已发布`ContentProvider`列表中，以供后面使用。同时这个方法返回了需要启动的`ProviderInfo`列表，`AMS.attachApplicationLocked`方法可以根据这个列表判断是否有需要启动的`ContentProvider`并设置`ContentProvider`启动超时检测
+
+### ActivityThread.handleBindApplication
+
+```java
+private void handleBindApplication(AppBindData data) {
+    ...
+    try {
+        // If the app is being launched for full backup or restore, bring it up in
+        // a restricted environment with the base application class.
+        //创建Application
+        app = data.info.makeApplication(data.restrictedBackupMode, null);
+    
+        ...
+
+        mInitialApplication = app;
+
+        // don't bring up providers in restricted mode; they may depend on the
+        // app's custom Application class
+        //在非受限模式下启动ContentProvider
+        if (!data.restrictedBackupMode) {
+            if (!ArrayUtils.isEmpty(data.providers)) {
+                installContentProviders(app, data.providers);
+            }
+        }
+
+        ...
+
+        //执行Application的onCreate方法
+        try {
+            mInstrumentation.callApplicationOnCreate(app);
+        } catch (Exception e) {
+            ...
+        }
+    } finally {
+        // If the app targets < O-MR1, or doesn't change the thread policy
+        // during startup, clobber the policy to maintain behavior of b/36951662
+        if (data.appInfo.targetSdkVersion < Build.VERSION_CODES.O_MR1
+                || StrictMode.getThreadPolicy().equals(writesAllowedPolicy)) {
+            StrictMode.setThreadPolicy(savedPolicy);
+        }
+    }
+    ...
+}
+```
+
+可以看到，在这个方法中直接调用了`installContentProviders`方法安装启动`ContentProvider`
+
+另外提一点，为什么我要把`Application`的创建和`onCreate`也放进来呢？现在市面上有很多库，包括很多教程告诉我们，可以通过注册`ContentProvider`的方式初始化SDK，获取全局`Context`，比如说著名的内存泄漏检测工具`LeakCanary`的新版本，想要使用它，直接添加它的依赖就行了，不需要对代码做哪怕一点的改动，究其原理，就是因为`ContentProvider`的启动时机是在`Application`创建后，`Application.onCreate`调用前，并且`ContentProvider`内的`Context`成员变量大概率就是`Application`，大家以后在开发过程中也可以妙用这一点
+
+## installContentProviders
+
+好了，现在这两种情况最终都走到了`ActivityThread.installContentProviders`方法中，那我们接下来就好好分析`ContentProvider`实际的启动安装流程
+
+```java
+private void installContentProviders(
+        Context context, List<ProviderInfo> providers) {
+    final ArrayList<ContentProviderHolder> results = new ArrayList<>();
+
+    for (ProviderInfo cpi : providers) {
+        //逐个启动
+        ContentProviderHolder cph = installProvider(context, null, cpi,
+                false /*noisy*/, true /*noReleaseNeeded*/, true /*stable*/);
+        if (cph != null) {
+            cph.noReleaseNeeded = true;
+            results.add(cph);
+        }
+    }
+
+    try {
+        //发布ContentProvider
+        ActivityManager.getService().publishContentProviders(
+            getApplicationThread(), results);
+    } catch (RemoteException ex) {
+        throw ex.rethrowFromSystemServer();
+    }
+}
+```
+
+这个方法很简单，便利所有待启动的`ContentProvider`信息列表，逐个启动安装`ContentProvider`，最后一起发布
+
+我们先看`installProvider`方法，我们在上一章中分析到，获取`ContentProvider`的时候也会调用这个方法，这次我们就结合起来一起分析
+
+```java
+private ContentProviderHolder installProvider(Context context,
+        ContentProviderHolder holder, ProviderInfo info,
+        boolean noisy, boolean noReleaseNeeded, boolean stable) {
+    ContentProvider localProvider = null;
+    IContentProvider provider;
+    if (holder == null || holder.provider == null) { //启动本地ContentProvider
+        Context c = null;
+        ApplicationInfo ai = info.applicationInfo;
+        //首先获取Context，一般情况下就是Application
+        if (context.getPackageName().equals(ai.packageName)) {
+            c = context;
+        } else if (mInitialApplication != null &&
+                mInitialApplication.getPackageName().equals(ai.packageName)) {
+            c = mInitialApplication;
+        } else {
+            try {
+                c = context.createPackageContext(ai.packageName,
+                        Context.CONTEXT_INCLUDE_CODE);
+            } catch (PackageManager.NameNotFoundException e) {
+                // Ignore
+            }
+        }
+        if (c == null) {
+            return null;
+        }
+
+        //Split Apks动态加载相关
+        if (info.splitName != null) {
+            try {
+                c = c.createContextForSplit(info.splitName);
+            } catch (NameNotFoundException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        try {
+            final java.lang.ClassLoader cl = c.getClassLoader();
+            //获取应用信息
+            LoadedApk packageInfo = peekPackageInfo(ai.packageName, true);
+            if (packageInfo == null) {
+                // System startup case.
+                packageInfo = getSystemContext().mPackageInfo;
+            }
+            //通过AppComponentFactory实例化ContentProvider
+            localProvider = packageInfo.getAppFactory()
+                    .instantiateProvider(cl, info.name);
+            //Transport类，继承自ContentProviderNative（Binder服务端）
+            provider = localProvider.getIContentProvider();
+            if (provider == null) {
+                return null;
+            }
+            // XXX Need to create the correct context for this provider.
+            //初始化ContentProvider，调用其onCreate方法
+            localProvider.attachInfo(c, info);
+        } catch (java.lang.Exception e) {
+            if (!mInstrumentation.onException(null, e)) {
+                throw new RuntimeException(
+                        "Unable to get provider " + info.name
+                        + ": " + e.toString(), e);
+            }
+            return null;
+        }
+    } else { //获取外部ContentProvider
+        provider = holder.provider;
+    }
+
+    ContentProviderHolder retHolder;
+
+    synchronized (mProviderMap) {
+        //对于本地ContentProvider来说，这里的实际类型是Transport，继承自ContentProviderNative（Binder服务端）
+        //对于外部ContentProvider来说，这里的实际类型是BinderProxy
+        IBinder jBinder = provider.asBinder();
+        if (localProvider != null) {
+            ComponentName cname = new ComponentName(info.packageName, info.name);
+            ProviderClientRecord pr = mLocalProvidersByName.get(cname);
+            if (pr != null) {
+                //如果已经存在相应的ContentProvider记录，使用其内部已存在的ContentProvider
+                provider = pr.mProvider;
+            } else {
+                //否则使用新创建的ContentProvider
+                holder = new ContentProviderHolder(info);
+                holder.provider = provider;
+                holder.noReleaseNeeded = true;
+                pr = installProviderAuthoritiesLocked(provider, localProvider, holder);
+                mLocalProviders.put(jBinder, pr);
+                mLocalProvidersByName.put(cname, pr);
+            }
+            retHolder = pr.mHolder;
+        } else {
+            ProviderRefCount prc = mProviderRefCountMap.get(jBinder);
+            if (prc != null) {
+                if (DEBUG_PROVIDER) {
+                    Slog.v(TAG, "installProvider: lost the race, updating ref count");
+                }
+                // We need to transfer our new reference to the existing
+                // ref count, releasing the old one...  but only if
+                // release is needed (that is, it is not running in the
+                // system process).
+                if (!noReleaseNeeded) {
+                    incProviderRefLocked(prc, stable);
+                    try {
+                        ActivityManager.getService().removeContentProvider(
+                                holder.connection, stable);
+                    } catch (RemoteException e) {
+                        //do nothing content provider object is dead any way
+                    }
+                }
+            } else {
+                ProviderClientRecord client = installProviderAuthoritiesLocked(
+                        provider, localProvider, holder);
+                if (noReleaseNeeded) {
+                    prc = new ProviderRefCount(holder, client, 1000, 1000);
+                } else {
+                    prc = stable
+                            ? new ProviderRefCount(holder, client, 1, 0)
+                            : new ProviderRefCount(holder, client, 0, 1);
+                }
+                mProviderRefCountMap.put(jBinder, prc);
+            }
+            retHolder = prc.holder;
+        }
+    }
+    return retHolder;
+}
+```
