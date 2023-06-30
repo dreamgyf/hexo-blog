@@ -878,7 +878,7 @@ private void handleBindApplication(AppBindData data) {
 
 另外提一点，为什么我要把`Application`的创建和`onCreate`也放进来呢？现在市面上有很多库，包括很多教程告诉我们，可以通过注册`ContentProvider`的方式初始化SDK，获取全局`Context`，比如说著名的内存泄漏检测工具`LeakCanary`的新版本，想要使用它，直接添加它的依赖就行了，不需要对代码做哪怕一点的改动，究其原理，就是因为`ContentProvider`的启动时机是在`Application`创建后，`Application.onCreate`调用前，并且`ContentProvider`内的`Context`成员变量大概率就是`Application`，大家以后在开发过程中也可以妙用这一点
 
-## installContentProviders
+## ActivityThread.installContentProviders
 
 好了，现在这两种情况最终都走到了`ActivityThread.installContentProviders`方法中，那我们接下来就好好分析`ContentProvider`实际的启动安装流程
 
@@ -909,7 +909,21 @@ private void installContentProviders(
 
 这个方法很简单，便利所有待启动的`ContentProvider`信息列表，逐个启动安装`ContentProvider`，最后一起发布
 
+### ActivityThread.installProvider
+
 我们先看`installProvider`方法，我们在上一章中分析到，获取`ContentProvider`的时候也会调用这个方法，这次我们就结合起来一起分析
+
+通过上文的代码，我们发现，有两处地方会调用`installProvider`方法，方法的入参有三种形式，分别为：
+
+- `holder`不为`null`，`info`不为`null`，`holder.provider`为`null`：在`ActivityThread.acquireProvider`方法中被调用，路径为 没有获取到已存在的`ContentProvider` -> `AMS.getContentProvider` -> `AMS.getContentProviderImpl` -> 发现目标`ContentProvider`可以在调用者进程中直接运行 -> 直接返回一个新的`ContentProviderHolder`（包含`ProviderInfo`） -> `ActivityThread.installProvider`，在这种情况下`installProvider`方法会在本地启动安装`ContentProvider`
+
+- `holder`为`null`，`info`不为`null`：在`ActivityThread.installContentProviders`方法中被调用，两条路径，一是App进程启动后自动执行，二是在`AMS.getContentProvider`方法中发现目标进程已启动但是`ContentProvider`未启动，调用`ActivityThread.scheduleInstallProvider`方法执行，在这种情况下`installProvider`方法会在本地启动安装`ContentProvider`
+
+- `holder`不为`null`，`holder.provider`不为`null`：在`ActivityThread.acquireProvider`方法中被调用，路径为 没有获取到已存在的`ContentProvider` -> `AMS.getContentProvider` -> `AMS.getContentProviderImpl` -> 获取到目标进程的远程`ContentProvider`引用 -> 包装成`ContentProviderHolder`返回 -> `ActivityThread.installProvider`，在这种情况下`installProvider`方法直接可以获取到远程`ContentProvider`引用，然后进行处理
+
+我们将这三种情况分成两种case分别分析
+
+#### 本地启动ContentProvider
 
 ```java
 private ContentProviderHolder installProvider(Context context,
@@ -975,16 +989,15 @@ private ContentProviderHolder installProvider(Context context,
             return null;
         }
     } else { //获取外部ContentProvider
-        provider = holder.provider;
+        ...
     }
 
     ContentProviderHolder retHolder;
 
     synchronized (mProviderMap) {
         //对于本地ContentProvider来说，这里的实际类型是Transport，继承自ContentProviderNative（Binder服务端）
-        //对于外部ContentProvider来说，这里的实际类型是BinderProxy
         IBinder jBinder = provider.asBinder();
-        if (localProvider != null) {
+        if (localProvider != null) { //本地启动ContentProvider的情况
             ComponentName cname = new ComponentName(info.packageName, info.name);
             ProviderClientRecord pr = mLocalProvidersByName.get(cname);
             if (pr != null) {
@@ -994,25 +1007,90 @@ private ContentProviderHolder installProvider(Context context,
                 //否则使用新创建的ContentProvider
                 holder = new ContentProviderHolder(info);
                 holder.provider = provider;
+                //对于本地ContentProvider来说，不存在释放引用这种情况
                 holder.noReleaseNeeded = true;
+                //创建ProviderClientRecord并将其保存到mProviderMap本地缓存中
                 pr = installProviderAuthoritiesLocked(provider, localProvider, holder);
+                //保存ProviderClientRecord到本地缓存中
                 mLocalProviders.put(jBinder, pr);
                 mLocalProvidersByName.put(cname, pr);
             }
             retHolder = pr.mHolder;
-        } else {
+        } else { //获取远程ContentProvider的情况
+            ...
+        }
+    }
+    return retHolder;
+}
+```
+
+我们在这里找到了`ContentProvider`创建并启动的入口，首先通过传入的`Context`（实际上就是`Application`）判断并确定创建并给`ContentProvider`使用的的`Context`是什么（一般情况下也是`Application`），然后获取到应用信息`LoadedApk`，再通过它得到`AppComponentFactory`（前面的文章中介绍过，如果没有在`AndroidManifest`中设置`android:appComponentFactory`属性，使用的便是默认的`AppComponentFactory`），接着通过`AppComponentFactory.instantiateProvider`方法实例化`ContentProvider`对象
+
+```java
+public @NonNull ContentProvider instantiateProvider(@NonNull ClassLoader cl,
+        @NonNull String className)
+        throws InstantiationException, IllegalAccessException, ClassNotFoundException {
+    return (ContentProvider) cl.loadClass(className).newInstance();
+}
+```
+
+默认的话就是通过`ClassName`反射调用默认构造函数实例化`ContentProvider`对象，最后再调用`ContentProvider.attachInfo`方法初始化
+
+```java
+public void attachInfo(Context context, ProviderInfo info) {
+    attachInfo(context, info, false);
+}
+
+private void attachInfo(Context context, ProviderInfo info, boolean testing) {
+    ...
+    if (mContext == null) {
+        mContext = context;
+        ...
+        ContentProvider.this.onCreate();
+    }
+}
+```
+
+详细内容我们就不分析了，只需要知道这里给`mContext`赋了值，然后调用了`ContentProvider.onCreate`方法就可以了
+
+到了这一步，`ContentProvider`就算是启动完成了，接下来需要执行一些安装步骤，其实也就是对缓存等进行一些处理。在`ContentProvider`实例化后，会调用其`getIContentProvider`方法给`provider`变量赋值，这里获得的对象其实是一个`Transport`对象，继承自`ContentProviderNative`，是一个`Binder`服务端对象，在`ContentProvider`初始化后，会对`Transport`对象调用`asBinder`方法获得`Binder`对象，这里获得的其实还是自己本身，接着从缓存中尝试获取`ProviderClientRecord`对象，如果获取到了，说明已经存在了相应的`ContentProvider`，使用`ProviderClientRecord`内部的`ContentProvider`，刚刚新创建的那个就可以丢弃了，如果没获取到，就去新建`ContentProviderHolder`以及`ProviderClientRecord`，然后将他们添加到各种缓存中，至此，`ContentProvider`的安装过程也到此结束
+
+#### 获取处理远程ContentProvider
+
+```java
+private ContentProviderHolder installProvider(Context context,
+        ContentProviderHolder holder, ProviderInfo info,
+        boolean noisy, boolean noReleaseNeeded, boolean stable) {
+    ContentProvider localProvider = null;
+    IContentProvider provider;
+    if (holder == null || holder.provider == null) { //启动本地ContentProvider
+        ...
+    } else { //获取外部ContentProvider
+        //实际类型为ContentProviderProxy
+        provider = holder.provider;
+    }
+
+    ContentProviderHolder retHolder;
+
+    synchronized (mProviderMap) {
+        //对于外部ContentProvider来说，这里的实际类型是BinderProxy
+        IBinder jBinder = provider.asBinder();
+        if (localProvider != null) { //本地启动ContentProvider的情况
+            ...
+        } else { //获取远程ContentProvider的情况
             ProviderRefCount prc = mProviderRefCountMap.get(jBinder);
-            if (prc != null) {
-                if (DEBUG_PROVIDER) {
-                    Slog.v(TAG, "installProvider: lost the race, updating ref count");
-                }
+            if (prc != null) { //如果ContentProvider引用已存在
                 // We need to transfer our new reference to the existing
                 // ref count, releasing the old one...  but only if
                 // release is needed (that is, it is not running in the
                 // system process).
+                //对于远程ContentProvider来说，如果目标App为system应用（UID为ROOT_UID或SYSTEM_UID）
+                //并且目标App不为设置（包名不为com.android.settings），则noReleaseNeeded为true
                 if (!noReleaseNeeded) {
+                    //增加已存在的ContentProvider引用的引用计数
                     incProviderRefLocked(prc, stable);
                     try {
+                        //释放传入的引用，移除ContentProviderConnection相关信息，更新引用计数
                         ActivityManager.getService().removeContentProvider(
                                 holder.connection, stable);
                     } catch (RemoteException e) {
@@ -1020,15 +1098,20 @@ private ContentProviderHolder installProvider(Context context,
                     }
                 }
             } else {
+                //创建ProviderClientRecord并将其保存到mProviderMap本地缓存中
                 ProviderClientRecord client = installProviderAuthoritiesLocked(
                         provider, localProvider, holder);
-                if (noReleaseNeeded) {
+                if (noReleaseNeeded) { //同上，目标App为system应用，不需要释放引用
+                    //新建一个ProviderRefCount，但引用计数初始化为一个较大的数值
+                    //这样后续无论调用方进程的ContentProvider引用计数如何变动都不会影响到AMS
                     prc = new ProviderRefCount(holder, client, 1000, 1000);
-                } else {
+                } else { //需要释放引用的情况下
+                    //正常的新建初始化一个ProviderRefCount
                     prc = stable
                             ? new ProviderRefCount(holder, client, 1, 0)
                             : new ProviderRefCount(holder, client, 0, 1);
                 }
+                //保存至缓存
                 mProviderRefCountMap.put(jBinder, prc);
             }
             retHolder = prc.holder;
@@ -1037,3 +1120,142 @@ private ContentProviderHolder installProvider(Context context,
     return retHolder;
 }
 ```
+
+对于`holder.provider`不为`null`的情况，直接获取远程`ContentProvider`引用，然后进行处理就可以了。这里获取到的`IContentProvider`的实际类型是`ContentProviderProxy`，然后对其调用`asBinder`方法，获取到的是`BinderProxy`对象，接着从缓存中尝试获取`ProviderRefCount`对象，如果缓存中已经有相应的引用对象了，则在需要释放引用（`!noReleaseNeeded`）的情况下使用原有的引用，释放参数传入进来的`ContentProvider`引用
+
+这里`noReleaseNeeded`是在`ContentProviderRecord`构造时赋值的，为`true`的条件是目标App为system应用（`UID`为`ROOT_UID`或`SYSTEM_UID`）并且目标App不为设置（包名不为`com.android.settings`）
+
+如果缓存中没有查找到相应的`ProviderRefCount`对象，新建`ProviderClientRecord`和`ProviderRefCount`对象，并将他们保存到缓存中，至于为什么在`noReleaseNeeded`的情况下，新建的`ProviderRefCount`的引用计数初始值为1000，我猜测是因为`noReleaseNeeded`代表了不需要释放引用，所以这里干脆设置一个比较大的值，这样无论调用方进程的`ContentProvider`引用计数怎样变动，都不会再调用到`AMS`的方法中去处理引用的变化，在非常早期的`Android`版本中（`Android 4.0.1`），这个值曾被设置为`10000`
+
+至此，远程`ContentProvider`的安装也结束了
+
+#### ActivityThread.installProviderAuthoritiesLocked
+
+接下来我们再简单的看一下两种case都会走到的`installProviderAuthoritiesLocked`方法吧
+
+```java
+private ProviderClientRecord installProviderAuthoritiesLocked(IContentProvider provider,
+        ContentProvider localProvider, ContentProviderHolder holder) {
+    final String auths[] = holder.info.authority.split(";");
+    final int userId = UserHandle.getUserId(holder.info.applicationInfo.uid);
+    ...
+    final ProviderClientRecord pcr = new ProviderClientRecord(
+            auths, provider, localProvider, holder);
+    for (String auth : auths) {
+        final ProviderKey key = new ProviderKey(auth, userId);
+        final ProviderClientRecord existing = mProviderMap.get(key);
+        if (existing != null) {
+            Slog.w(TAG, "Content provider " + pcr.mHolder.info.name
+                    + " already published as " + auth);
+        } else {
+            mProviderMap.put(key, pcr);
+        }
+    }
+    return pcr;
+}
+```
+
+这个方法很简单，新建了一个`ProviderClientRecord`并将其添加到`mProviderMap`缓存中，这里的操作对应着最前面的`acquireExistingProvider`方法，有了这个缓存，以后就可以直接拿，而不用再复杂的经过一系列的`AMS`跨进程操作了
+
+### AMS.publishContentProviders
+
+`ContentProvider`全部启动安装完后，便要调用`AMS.publishContentProviders`将他们发布出去，供外部使用了
+
+```java
+public final void publishContentProviders(IApplicationThread caller,
+        List<ContentProviderHolder> providers) {
+    if (providers == null) {
+        return;
+    }
+
+    synchronized (this) {
+        final ProcessRecord r = getRecordForAppLocked(caller);
+        if (r == null) {
+            throw new SecurityException(
+                    "Unable to find app for caller " + caller
+                    + " (pid=" + Binder.getCallingPid()
+                    + ") when publishing content providers");
+        }
+
+        final long origId = Binder.clearCallingIdentity();
+
+        final int N = providers.size();
+        for (int i = 0; i < N; i++) {
+            ContentProviderHolder src = providers.get(i);
+            if (src == null || src.info == null || src.provider == null) {
+                continue;
+            }
+            //App进程启动时或AMS.getContentProvider中已经将相应ContentProviderRecord添加到了pubProviders中
+            ContentProviderRecord dst = r.pubProviders.get(src.info.name);
+            if (dst != null) {
+                //保存至缓存中
+                ComponentName comp = new ComponentName(dst.info.packageName, dst.info.name);
+                mProviderMap.putProviderByClass(comp, dst);
+                String names[] = dst.info.authority.split(";");
+                for (int j = 0; j < names.length; j++) {
+                    mProviderMap.putProviderByName(names[j], dst);
+                }
+
+                //ContentProvider已经启动完毕，将其从正在启动的ContentProvider列表中移除
+                int launchingCount = mLaunchingProviders.size();
+                int j;
+                boolean wasInLaunchingProviders = false;
+                for (j = 0; j < launchingCount; j++) {
+                    if (mLaunchingProviders.get(j) == dst) {
+                        mLaunchingProviders.remove(j);
+                        wasInLaunchingProviders = true;
+                        j--;
+                        launchingCount--;
+                    }
+                }
+                //移除ContentProvider启动超时监听
+                if (wasInLaunchingProviders) {
+                    mHandler.removeMessages(CONTENT_PROVIDER_PUBLISH_TIMEOUT_MSG, r);
+                }
+                // Make sure the package is associated with the process.
+                // XXX We shouldn't need to do this, since we have added the package
+                // when we generated the providers in generateApplicationProvidersLocked().
+                // But for some reason in some cases we get here with the package no longer
+                // added...  for now just patch it in to make things happy.
+                r.addPackage(dst.info.applicationInfo.packageName,
+                        dst.info.applicationInfo.longVersionCode, mProcessStats);
+                synchronized (dst) {
+                    dst.provider = src.provider;
+                    dst.setProcess(r);
+                    //让出锁，通知其他wait的地方
+                    //对应着AMS.getContentProvider的第四部分：等待ContentProvider启动完成
+                    dst.notifyAll();
+                }
+                dst.mRestartCount = 0;
+                updateOomAdjLocked(r, true, OomAdjuster.OOM_ADJ_REASON_GET_PROVIDER);
+                maybeUpdateProviderUsageStatsLocked(r, src.info.packageName,
+                        src.info.authority);
+            }
+        }
+
+        Binder.restoreCallingIdentity(origId);
+    }
+}
+```
+
+遍历整个待发布的`ContentProvider`列表，从`ProcessRecord.pubProviders`中查找相对应的`ContentProviderRecord`，我们在之前的章节中已经分析过了，App进程启动时或`AMS.getContentProvider`中已经将相应`ContentProviderRecord`添加到了`pubProviders`中，然后就是将其保存到各个缓存中，由于`ContentProvider`已经启动完毕，所以需要将其从正在启动的`ContentProvider`列表中移除，在`ContentProvider`正常启动的情况下，我们需要将`ContentProvider`的启动超时监听移除，最后，获取`ContentProviderRecord`同步锁，将准备好的`ContentProvider`赋值到`ContentProviderRecord`中，接着调用`notifyAll`方法通知其他调用过`wait`的地方，将锁让出，这里对应的就是`AMS.getContentProvider`的第四部分：等待`ContentProvider`启动完成
+
+```java
+private ContentProviderHolder getContentProviderImpl(IApplicationThread caller,
+        String name, IBinder token, int callingUid, String callingPackage, String callingTag,
+        boolean stable, int userId) {
+    ...
+    //这里的cpr和在publishContentProviders获得的dst是一个对象
+    synchronized (cpr) {
+        while (cpr.provider == null) {
+            ...
+            //释放锁，等待ContentProvider启动完成
+            cpr.wait(wait);
+            ...
+        }
+    }
+    ...
+}
+```
+
+这样，`ContentProvider`一发布，这里就会收到通知，解除`wait`状态，获得到`ContentProvider`，返回出去，是不是感觉一切都串起来了？
