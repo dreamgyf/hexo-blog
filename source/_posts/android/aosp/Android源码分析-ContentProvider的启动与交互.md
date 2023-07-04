@@ -1259,3 +1259,568 @@ private ContentProviderHolder getContentProviderImpl(IApplicationThread caller,
 ```
 
 这样，`ContentProvider`一发布，这里就会收到通知，解除`wait`状态，获得到`ContentProvider`，返回出去，是不是感觉一切都串起来了？
+
+# ContentProvider引用计数
+
+`ContentProvider`的获取与启动分析完了，接下来我们聊聊它的引用计数，为下一小节分析`ContentProvider`死亡杀死调用方进程的过程做准备
+
+`ActivityThread`层的引用计数是和`AMS`层的引用计数分开的，`ActivityThread`记录的是目标`ContentProvider`在本进程中有多少处正在使用，而`AMS`记录的是目标`ContentProvider`正在被多少个进程使用
+
+## ActivityThread层的引用计数
+
+### 增加引用计数
+
+我们先从`ActivityThread`层增加引用计数开始说起，在`ActivityThread`获取`ContentProvider`时，便会调用`incProviderRefLocked`方法来增加引用计数，具体的时机为`acquireExistingProvider`或`installProvider`时，代码我就不重复放了，大家看前面几个小节就行（后同）
+
+```java
+private final void incProviderRefLocked(ProviderRefCount prc, boolean stable) {
+    if (stable) {
+        //增加ActivityThread的stable引用计数
+        prc.stableCount += 1;
+        //本进程对目标ContentProvider产生了stable引用关系
+        if (prc.stableCount == 1) {
+            // We are acquiring a new stable reference on the provider.
+            int unstableDelta;
+            //正在移除ContentProvider引用中（释放ContentProvider后发现stable和unstable引用计数均为0）
+            if (prc.removePending) {
+                // We have a pending remove operation, which is holding the
+                // last unstable reference.  At this point we are converting
+                // that unstable reference to our new stable reference.
+                //当ActivityThread释放一个stable的ContentProvider时，如果释放完后，
+                //发现stable和unstable引用计数均为0，则会暂时保留一个unstable引用
+                //所以这里需要为 -1 ，将这个unstable引用移除
+                unstableDelta = -1;
+                // Cancel the removal of the provider.
+                prc.removePending = false;
+                // There is a race! It fails to remove the message, which
+                // will be handled in completeRemoveProvider().
+                //取消移除ContentProvider引用
+                mH.removeMessages(H.REMOVE_PROVIDER, prc);
+            } else {
+                //对于正常情况，只需要增加stable引用计数，不需要动unstable引用计数
+                unstableDelta = 0;
+            }
+            try {
+                //AMS层修改引用计数
+                ActivityManager.getService().refContentProvider(
+                        prc.holder.connection, 1, unstableDelta);
+            } catch (RemoteException e) {
+                //do nothing content provider object is dead any way
+            }
+        }
+    } else {
+        //增加ActivityThread的unstable引用计数
+        prc.unstableCount += 1;
+        //本进程对目标ContentProvider产生了unstable引用关系
+        if (prc.unstableCount == 1) {
+            // We are acquiring a new unstable reference on the provider.
+            //正在移除ContentProvider引用中（释放ContentProvider后发现stable和unstable引用计数均为0）
+            if (prc.removePending) {
+                // Oh look, we actually have a remove pending for the
+                // provider, which is still holding the last unstable
+                // reference.  We just need to cancel that to take new
+                // ownership of the reference.
+                //取消移除ContentProvider引用
+                prc.removePending = false;
+                mH.removeMessages(H.REMOVE_PROVIDER, prc);
+            } else {
+                // First unstable ref, increment our count in the
+                // activity manager.
+                try {
+                    //增加AMS层的unstable引用计数
+                    ActivityManager.getService().refContentProvider(
+                            prc.holder.connection, 0, 1);
+                } catch (RemoteException e) {
+                    //do nothing content provider object is dead any way
+                }
+            }
+        }
+    }
+}
+```
+
+这里的逻辑需要配合着`ContentProvider`释放引用那里一起看才好理解，我先提前解释一下
+
+首先，`removePending`这个变量表示此`ContentProvider`正在移除中，当`ActivityThread`减少引用计数，检查到`stable`和`unstable`引用计数均为`0`后被赋值为`true`，并且会向`Handler`发送一条`what`值为`REMOVE_PROVIDER`的延时消息，在一定时间后便会触发`ContentProvider`移除操作，清理本地缓存，再将`removePending`重新置为`false`，所以当这里`removePending`为`true`则说明此`ContentProvider`还没完全被移除，我们把这个消息取消掉继续使用这个`ContentProvider`
+
+对于`stable`引用的情况下，当`ActivityThread`减少引用计数，检查到`stable`和`unstable`引用计数均为`0`后，会暂时保留一个`unstable`引用，等到后面真正触发到了移除`ContentProvider`的时候再将这个`unstable`引用移除，所以在增加引用计数的时候需要考虑到这一点，在这种情况下要将`AMS`层的`unstable`引用计数减一
+
+对于其他的情况就是正常的增加`ActivityThread`层引用计数，然后调用`AMS.refContentProvider`方法操作`AMS`层的引用计数
+
+### 减少引用计数
+
+`ContentProvider`使用完后会调用`ActivityThread.releaseProvider`方法，以`query`方法为例，最后会调用`releaseUnstableProvider`和`releaseProvider`方法，最终都会走到这里来
+
+```java
+public final boolean releaseProvider(IContentProvider provider, boolean stable) {
+    if (provider == null) {
+        return false;
+    }
+
+    IBinder jBinder = provider.asBinder();
+    synchronized (mProviderMap) {
+        ProviderRefCount prc = mProviderRefCountMap.get(jBinder);
+        if (prc == null) {
+            // The provider has no ref count, no release is needed.
+            return false;
+        }
+
+        boolean lastRef = false;
+        if (stable) {
+            //引用计数已经为0，无法再减了
+            if (prc.stableCount == 0) {
+                return false;
+            }
+            //减少ActivityThread的stable引用计数
+            prc.stableCount -= 1;
+            if (prc.stableCount == 0) {
+                // What we do at this point depends on whether there are
+                // any unstable refs left: if there are, we just tell the
+                // activity manager to decrement its stable count; if there
+                // aren't, we need to enqueue this provider to be removed,
+                // and convert to holding a single unstable ref while
+                // doing so.
+                lastRef = prc.unstableCount == 0;
+                try {
+                    //如果是最后的引用，则暂时保留一个unstable引用
+                    ActivityManager.getService().refContentProvider(
+                            prc.holder.connection, -1, lastRef ? 1 : 0);
+                } catch (RemoteException e) {
+                    //do nothing content provider object is dead any way
+                }
+            }
+        } else {
+            //引用计数已经为0，无法再减了
+            if (prc.unstableCount == 0) {
+                return false;
+            }
+            //减少ActivityThread的unstable引用计数
+            prc.unstableCount -= 1;
+            if (prc.unstableCount == 0) {
+                // If this is the last reference, we need to enqueue
+                // this provider to be removed instead of telling the
+                // activity manager to remove it at this point.
+                lastRef = prc.stableCount == 0;
+                //如果是最后的引用，则不进入到这里，暂时保留一个unstable引用
+                if (!lastRef) {
+                    try {
+                        //减少AMS引用计数
+                        ActivityManager.getService().refContentProvider(
+                                prc.holder.connection, 0, -1);
+                    } catch (RemoteException e) {
+                        //do nothing content provider object is dead any way
+                    }
+                }
+            }
+        }
+
+        if (lastRef) {
+            if (!prc.removePending) {
+                // Schedule the actual remove asynchronously, since we don't know the context
+                // this will be called in.
+                //表面此ContentProvider正在移除中
+                prc.removePending = true;
+                //发送延时消息，等待一定时间后移除ContentProvider
+                Message msg = mH.obtainMessage(H.REMOVE_PROVIDER, prc);
+                mH.sendMessageDelayed(msg, CONTENT_PROVIDER_RETAIN_TIME);
+            } else {
+                Slog.w(TAG, "Duplicate remove pending of provider " + prc.holder.info.name);
+            }
+        }
+        return true;
+    }
+}
+```
+
+可以看到，在减完引用计数后，如果发现是最后一个引用，即`stable`和`unstable`引用计数均为`0`，此时无论是`stable`还是`unstable`都会让`AMS`暂时保留一个`unstable`引用，然后发送一条`what`值为`REMOVE_PROVIDER`的延时消息，等待一定时间后移除`ContentProvider`，当时间到了触发这条消息时，会调用到`ActivityThread.completeRemoveProvider`方法
+
+```java
+final void completeRemoveProvider(ProviderRefCount prc) {
+    synchronized (mProviderMap) {
+        if (!prc.removePending) {
+            // There was a race!  Some other client managed to acquire
+            // the provider before the removal was completed.
+            // Abort the removal.  We will do it later.
+            return;
+        }
+
+        // More complicated race!! Some client managed to acquire the
+        // provider and release it before the removal was completed.
+        // Continue the removal, and abort the next remove message.
+        prc.removePending = false;
+
+        //移除缓存
+        final IBinder jBinder = prc.holder.provider.asBinder();
+        ProviderRefCount existingPrc = mProviderRefCountMap.get(jBinder);
+        if (existingPrc == prc) {
+            mProviderRefCountMap.remove(jBinder);
+        }
+
+        //移除缓存
+        for (int i=mProviderMap.size()-1; i>=0; i--) {
+            ProviderClientRecord pr = mProviderMap.valueAt(i);
+            IBinder myBinder = pr.mProvider.asBinder();
+            if (myBinder == jBinder) {
+                mProviderMap.removeAt(i);
+            }
+        }
+    }
+
+    try {
+        //处理AMS层引用计数
+        ActivityManager.getService().removeContentProvider(
+                prc.holder.connection, false);
+    } catch (RemoteException e) {
+        //do nothing content provider object is dead any way
+    }
+}
+```
+
+这个方法将进程内所持有的`ContentProvider`相关缓存清除，然后调用`AMS.removeContentProvider`方法通知`AMS`移除`ContentProvider`，处理相应的引用计数。这里我们发现，调用`AMS.removeContentProvider`方法传入的最后一个参数`stable`为`false`，因为我们之前在`stable`和`unstable`引用计数均为`0`的情况下，保留了一个`unstable`引用，所以这时移除的`ContentProvider`引用也是`unstable`引用
+
+## AMS层的引用计数
+
+接着我们来看`AMS`层的引用计数
+
+### AMS.refContentProvider
+
+我们就先从我们刚刚分析的`ActivityThread`层的引用计数修改后续：`refContentProvider` 看起
+
+```java
+public boolean refContentProvider(IBinder connection, int stable, int unstable) {
+    ContentProviderConnection conn;
+    ...
+    conn = (ContentProviderConnection)connection;
+    ...
+
+    synchronized (this) {
+        if (stable > 0) {
+            conn.numStableIncs += stable;
+        }
+        stable = conn.stableCount + stable;
+        if (stable < 0) {
+            throw new IllegalStateException("stableCount < 0: " + stable);
+        }
+
+        if (unstable > 0) {
+            conn.numUnstableIncs += unstable;
+        }
+        unstable = conn.unstableCount + unstable;
+        if (unstable < 0) {
+            throw new IllegalStateException("unstableCount < 0: " + unstable);
+        }
+
+        if ((stable+unstable) <= 0) {
+            throw new IllegalStateException("ref counts can't go to zero here: stable="
+                    + stable + " unstable=" + unstable);
+        }
+        conn.stableCount = stable;
+        conn.unstableCount = unstable;
+        return !conn.dead;
+    }
+}
+```
+
+这个方法很简单，应该不需要再多做分析了吧？就是简单的修改`ContentProviderConnection`的引用计数值
+
+### AMS.incProviderCountLocked
+
+接下来我们看`AMS`层引用计数的增加，`AMS.incProviderCountLocked`这个方法的触发时机是在`AMS.getContentProviderImpl`方法中
+
+```java
+ContentProviderConnection incProviderCountLocked(ProcessRecord r,
+        final ContentProviderRecord cpr, IBinder externalProcessToken, int callingUid,
+        String callingPackage, String callingTag, boolean stable) {
+    if (r != null) {
+        for (int i=0; i<r.conProviders.size(); i++) {
+            ContentProviderConnection conn = r.conProviders.get(i);
+            //如果连接已存在，在其基础上增加引用计数
+            if (conn.provider == cpr) {
+                if (stable) {
+                    conn.stableCount++;
+                    conn.numStableIncs++;
+                } else {
+                    conn.unstableCount++;
+                    conn.numUnstableIncs++;
+                }
+                return conn;
+            }
+        }
+        //新建ContentProviderConnection连接
+        ContentProviderConnection conn = new ContentProviderConnection(cpr, r, callingPackage);
+        //建立关联
+        conn.startAssociationIfNeeded();
+        if (stable) {
+            conn.stableCount = 1;
+            conn.numStableIncs = 1;
+        } else {
+            conn.unstableCount = 1;
+            conn.numUnstableIncs = 1;
+        }
+        //添加连接
+        cpr.connections.add(conn);
+        r.conProviders.add(conn);
+        //建立关联
+        startAssociationLocked(r.uid, r.processName, r.getCurProcState(),
+                cpr.uid, cpr.appInfo.longVersionCode, cpr.name, cpr.info.processName);
+        return conn;
+    }
+    cpr.addExternalProcessHandleLocked(externalProcessToken, callingUid, callingTag);
+    return null;
+}
+```
+
+如果调用方进程已存在对应`ContentProviderConnection`连接，则在其基础上增加引用计数，否则新建连接，然后初始化引用计数值
+
+### AMS.decProviderCountLocked
+
+然后是减少引用计数，之前在`ActivityThread`减引用到0后，会延时调用`ActivityThread.completeRemoveProvider`方法，在这个方法中会调用到`AMS.removeContentProvider`方法
+
+```java
+public void removeContentProvider(IBinder connection, boolean stable) {
+    long ident = Binder.clearCallingIdentity();
+    try {
+        synchronized (this) {
+            ContentProviderConnection conn = (ContentProviderConnection)connection;
+            ...
+            //减少引用计数
+            if (decProviderCountLocked(conn, null, null, stable)) {
+                //更新进程优先级
+                updateOomAdjLocked(OomAdjuster.OOM_ADJ_REASON_REMOVE_PROVIDER);
+            }
+        }
+    } finally {
+        Binder.restoreCallingIdentity(ident);
+    }
+}
+```
+
+在这个方法中便会调用`AMS.decProviderCountLocked`减少引用计数，然后更新进程优先级
+
+```java
+boolean decProviderCountLocked(ContentProviderConnection conn,
+        ContentProviderRecord cpr, IBinder externalProcessToken, boolean stable) {
+    if (conn != null) {
+        cpr = conn.provider;
+        //减少引用计数值
+        if (stable) {
+            conn.stableCount--;
+        } else {
+            conn.unstableCount--;
+        }
+        if (conn.stableCount == 0 && conn.unstableCount == 0) {
+            //停止关联
+            conn.stopAssociation();
+            //移除连接
+            cpr.connections.remove(conn);
+            conn.client.conProviders.remove(conn);
+            if (conn.client.setProcState < PROCESS_STATE_LAST_ACTIVITY) {
+                // The client is more important than last activity -- note the time this
+                // is happening, so we keep the old provider process around a bit as last
+                // activity to avoid thrashing it.
+                if (cpr.proc != null) {
+                    cpr.proc.lastProviderTime = SystemClock.uptimeMillis();
+                }
+            }
+            //停止关联
+            stopAssociationLocked(conn.client.uid, conn.client.processName, cpr.uid,
+                    cpr.appInfo.longVersionCode, cpr.name, cpr.info.processName);
+            return true;
+        }
+        return false;
+    }
+    cpr.removeExternalProcessHandleLocked(externalProcessToken);
+    return false;
+}
+```
+
+减少引用计数值，如果`stable`和`unstable`引用计数均为`0`，则将这个连接移除
+
+# ContentProvider死亡杀死调用方进程的过程
+
+我们前面提到过，`ContentProvider`所在进程死亡会将与其所有有`stable`关联的调用方进程杀死，这是怎么做到的呢？在之前的文章中，我们介绍过进程启动时，在调用`AMS.attachApplicationLocked`时会注册一个App进程死亡回调，我们就从进程死亡，触发死亡回调开始分析
+
+```java
+private boolean attachApplicationLocked(@NonNull IApplicationThread thread,
+        int pid, int callingUid, long startSeq) {
+    ...
+    //注册App进程死亡回调
+    AppDeathRecipient adr = new AppDeathRecipient(
+            app, pid, thread);
+    thread.asBinder().linkToDeath(adr, 0);
+    app.deathRecipient = adr;
+    ...
+}
+```
+
+注册了死亡回调后，如果对应`binder`进程死亡，便会回调`IBinder.DeathRecipient.binderDied`方法，我们来看一下`AppDeathRecipient`对这个方法的实现
+
+```java
+private final class AppDeathRecipient implements IBinder.DeathRecipient {
+    final ProcessRecord mApp;
+    final int mPid;
+    final IApplicationThread mAppThread;
+
+    AppDeathRecipient(ProcessRecord app, int pid,
+            IApplicationThread thread) {
+        mApp = app;
+        mPid = pid;
+        mAppThread = thread;
+    }
+
+    @Override
+    public void binderDied() {
+        synchronized(ActivityManagerService.this) {
+            appDiedLocked(mApp, mPid, mAppThread, true, null);
+        }
+    }
+}
+```
+
+直接转手调用`AMS.appDiedLocked`方法，然后经过`handleAppDiedLocked`调用到`cleanUpApplicationRecordLocked`方法中
+
+```java
+final boolean cleanUpApplicationRecordLocked(ProcessRecord app,
+        boolean restarting, boolean allowRestart, int index, boolean replacingPid) {
+    ...
+
+    boolean restart = false;
+
+    // Remove published content providers.
+    //清除已发布的ContentProvider
+    for (int i = app.pubProviders.size() - 1; i >= 0; i--) {
+        ContentProviderRecord cpr = app.pubProviders.valueAt(i);
+        if (cpr.proc != app) {
+            // If the hosting process record isn't really us, bail out
+            continue;
+        }
+        final boolean alwaysRemove = app.bad || !allowRestart;
+        final boolean inLaunching = removeDyingProviderLocked(app, cpr, alwaysRemove);
+        if (!alwaysRemove && inLaunching && cpr.hasConnectionOrHandle()) {
+            // We left the provider in the launching list, need to
+            // restart it.
+            restart = true;
+        }
+
+        cpr.provider = null;
+        cpr.setProcess(null);
+    }
+    app.pubProviders.clear();
+
+    // Take care of any launching providers waiting for this process.
+    //清除正在启动中的ContentProvider
+    if (cleanupAppInLaunchingProvidersLocked(app, false)) {
+        mProcessList.noteProcessDiedLocked(app);
+        restart = true;
+    }
+
+    // Unregister from connected content providers.
+    //清除已连接的ContentProvider
+    if (!app.conProviders.isEmpty()) {
+        for (int i = app.conProviders.size() - 1; i >= 0; i--) {
+            ContentProviderConnection conn = app.conProviders.get(i);
+            conn.provider.connections.remove(conn);
+            stopAssociationLocked(app.uid, app.processName, conn.provider.uid,
+                    conn.provider.appInfo.longVersionCode, conn.provider.name,
+                    conn.provider.info.processName);
+        }
+        app.conProviders.clear();
+    }
+    ...
+}
+```
+
+可以看到，这个方法中遍历了`ProcessRecord.pubProviders`，逐个对发布的`ContentProvider`调用`removeDyingProviderLocked`方法执行移除操作
+
+```java
+private final boolean removeDyingProviderLocked(ProcessRecord proc,
+        ContentProviderRecord cpr, boolean always) {
+    boolean inLaunching = mLaunchingProviders.contains(cpr);
+    if (inLaunching && !always && ++cpr.mRestartCount > ContentProviderRecord.MAX_RETRY_COUNT) {
+        // It's being launched but we've reached maximum attempts, force the removal
+        always = true;
+    }
+
+    if (!inLaunching || always) {
+        synchronized (cpr) {
+            cpr.launchingApp = null;
+            cpr.notifyAll();
+        }
+        final int userId = UserHandle.getUserId(cpr.uid);
+        // Don't remove from provider map if it doesn't match
+        // could be a new content provider is starting
+        //移除缓存
+        if (mProviderMap.getProviderByClass(cpr.name, userId) == cpr) {
+            mProviderMap.removeProviderByClass(cpr.name, userId);
+        }
+        String names[] = cpr.info.authority.split(";");
+        for (int j = 0; j < names.length; j++) {
+            // Don't remove from provider map if it doesn't match
+            // could be a new content provider is starting
+            //移除缓存
+            if (mProviderMap.getProviderByName(names[j], userId) == cpr) {
+                mProviderMap.removeProviderByName(names[j], userId);
+            }
+        }
+    }
+
+    for (int i = cpr.connections.size() - 1; i >= 0; i--) {
+        ContentProviderConnection conn = cpr.connections.get(i);
+        if (conn.waiting) {
+            // If this connection is waiting for the provider, then we don't
+            // need to mess with its process unless we are always removing
+            // or for some reason the provider is not currently launching.
+            if (inLaunching && !always) {
+                continue;
+            }
+        }
+        ProcessRecord capp = conn.client;
+        conn.dead = true;
+        if (conn.stableCount > 0) {
+            if (!capp.isPersistent() && capp.thread != null
+                    && capp.pid != 0
+                    && capp.pid != MY_PID) {
+                //当调用方与被杀死的目标ContentProvider进程间有stable连接
+                //并且调用方App进程非persistent进程并且非system_server进程中的情况下
+                //杀死调用方进程
+                capp.kill("depends on provider "
+                        + cpr.name.flattenToShortString()
+                        + " in dying proc " + (proc != null ? proc.processName : "??")
+                        + " (adj " + (proc != null ? proc.setAdj : "??") + ")",
+                        ApplicationExitInfo.REASON_DEPENDENCY_DIED,
+                        ApplicationExitInfo.SUBREASON_UNKNOWN,
+                        true);
+            }
+        } else if (capp.thread != null && conn.provider.provider != null) {
+            try {
+                //通知调用方移除ContentProvider
+                capp.thread.unstableProviderDied(conn.provider.provider.asBinder());
+            } catch (RemoteException e) {
+            }
+            // In the protocol here, we don't expect the client to correctly
+            // clean up this connection, we'll just remove it.
+            //移除连接
+            cpr.connections.remove(i);
+            if (conn.client.conProviders.remove(conn)) {
+                stopAssociationLocked(capp.uid, capp.processName, cpr.uid,
+                        cpr.appInfo.longVersionCode, cpr.name, cpr.info.processName);
+            }
+        }
+    }
+
+    if (inLaunching && always) {
+        mLaunchingProviders.remove(cpr);
+        cpr.mRestartCount = 0;
+        inLaunching = false;
+    }
+    return inLaunching;
+}
+```
+
+可以看到，在这个方法中遍历了`ContentProvider`下的所有连接，当发现有其他进程与自己建立了`stable`连接（`conn.stableCount > 0`），且调用方进程不是`persistent`进程（常驻进程，只有拥有系统签名的App设置这个属性才生效），也不是运行在`system_server`进程，调用`ProcessRecord.kill`方法直接杀死进程，对于没有建立`stable`连接的调用方进程，调用`IApplicationThread.unstableProviderDied`方法通知调用方进程移除相应的`ContentProvider`
+
+所以，使用`ContentProvider`是有一定风险的，大家要注意规避
+
+# 总结
+
+到这里，整个`Framework`层关于`ContentProvider`的内容应该都分析完了，希望大家看完后能获得一些收获，接下来的文章应该会去分析`Service`相关源码，敬请期待~
