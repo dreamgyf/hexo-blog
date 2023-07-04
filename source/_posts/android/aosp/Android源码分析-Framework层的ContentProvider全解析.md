@@ -1,5 +1,5 @@
 ---
-title: Android源码分析 - ContentProvider的启动与交互
+title: Android源码分析 - Framework层的ContentProvider全解析
 date: 2023-06-20 17:29:17
 tags: 
 - Android源码
