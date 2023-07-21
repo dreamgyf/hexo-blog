@@ -6,6 +6,29 @@ categories:
 - [Android, 常见问题]
 ---
 
+# Activity
+
+## 透明与方向
+
+当且仅当`Android 8.0`系统中，不能对一个`Activity`同时设置透明（`windowIsTranslucent`和`windowIsFloating`）和方向（`screenOrientation`），否则会抛出`Only fullscreen opaque activities can request orientation`异常崩溃
+
+解决方法：
+
+在代码中先判断系统版本，再设置方向
+
+```kotlin
+override fun onCreate(savedInstanceState: Bundle?) {
+    ...
+    if (Build.VERSION.SDK_INT != Build.VERSION_CODES.O) {
+        @SuppressLint("SourceLockedOrientationActivity")
+        requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+    }
+    ...
+}
+```
+
+---
+
 # 滑动
 
 1. 滑动嵌套
@@ -80,6 +103,22 @@ if (mRecyclerView != null && mRecyclerView.getChildCount() > 0) {
 主要是因为`RecyclerView`动态更新数据时，会执行多次`measure`，但只会在第一次`measure`的时候调用`ItemDecoration.getItemOffsets`（因为`LP`里的`mInsetsDirty`变量），此时获得的`spanIndex`是一个错误值
 
 这个问题的具体分析可以看[这篇文章](https://blog.kyleduo.com/2017/07/27/recyclerview-wrong-decoration-inset/)，暂时没有什么好的解决方案，不建议大家使用反射，毕竟你不知道`Android`会不会更改这个变量
+
+## 嵌套ViewPager
+
+在`RecyclerView`中嵌套`ViewPager`的情况下，当你将一个`ViewPager`滑动出视野再滑回来，这个`ViewPager`的下一个切换会没有动画
+
+原因：当`RecyclerView`的`Item`滑入滑出屏幕时分别会调用子`View`的`onAttachedToWindow`和`onDetachedFromWindow`方法，当`ViewPager`触发`onAttachedToWindow`后，会将其里面的一个表示是否为第一次布局的成员变量`mFirstLayout`赋值为`true`，当这个变量为`true`时，`ViewPager`会以无动画的方式显示当前`Item`
+
+解决方法：重写`RecyclerView.Adapter`的`onViewAttachedToWindow`方法，在里面对`ViewPager`调用其`requestLayout`方法，在`ViewPager.onLayout`方法最后，会将`mFirstLayout`变量重新赋值为`false`
+
+---
+
+# Bitmap
+
+## RenderScript高斯模糊
+
+在使用`RenderScript`做高斯模糊时，需要注意，它只支持格式为`ALPHA_8`、`ARGB_4444`、`ARGB_8888`、`RGB_565`的`Bitmap`，对于其他格式的`Bitmap`，可以尝试使用`Bitmap.reconfigure`方法转换格式（这个方法不能将`Bitmap`从小格式转换成大格式，比如不能从占用32个bits的`ARGB_8888`转换成占用64个bits的`RGBA_F16`）
 
 ---
 
