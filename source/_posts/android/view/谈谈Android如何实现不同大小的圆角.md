@@ -455,10 +455,81 @@ override fun onDraw(canvas: Canvas) {
 
 这里，我们调用父类的`onDraw`方法，获取到原始无圆角的`Bitmap`，然后绘制`Path`，再通过`PorterDuff`的叠加效果绘制我们刚刚得到的原始`Bitmap`，由于`PorterDuff.Mode.SRC_IN`的效果是取两层绘制交集，显示上层，所以我们最终便获得了一个带圆角的图片
 
+### BitmapShader
+
+有人指出，可以使用`BitmapShader`方案，我去实测了一下，确实可以在开启了硬件加速的情况下使用，目前看上去似乎没有什么缺点，在此感谢评论区的大神们，这种方案实现起来也很简单，和上面的差不多
+
+首先重写`onSizeChanged`方法
+
+```kotlin
+private var bitmapShader: BitmapShader? = null
+
+override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+    super.onSizeChanged(w, h, oldw, oldh)
+    path.reset()
+    path.addRoundRect(0f, 0f, w.toFloat(), h.toFloat(), radii, Path.Direction.CW)
+
+    rawBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+    rawBitmapCanvas = Canvas(rawBitmap!!)
+    bitmapShader = BitmapShader(rawBitmap!!, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP)
+    paint.shader = bitmapShader
+}
+```
+
+然后`onDraw`方法就更简单了
+
+```kotlin
+override fun onDraw(canvas: Canvas) {
+    val rawBitmapCanvas = rawBitmapCanvas ?: return
+    super.onDraw(rawBitmapCanvas)
+    canvas.drawPath(path, paint)
+}
+```
+
 # 截图问题
 
-如果想要将`View`截图成`Bitmap`，在`Android 8.0`及以上系统中我们可以使用`PixelCopy`，此时使用`CardView`或`Outline`裁切的圆角不会有任何问题，而在`Android 8.0`以下的系统中，通常我们是构建一个带`Bitmap`的`Canvas`，然后对要截图的`View`调用`draw`方法达成截图效果，而在这种情况下，使用`CardView`或`Outline`裁切的圆角便会出现无效的情况（截图出来的`Bitmap`中，圆角没了），这种情况的出现似乎也和硬件加速有关，针对这种问题，我个人的想法是准备两套布局，`8.0`以上使用`CardView`或`Outline`，截图使用`PixelCopy`，`8.0`以下使用`PorterDuff`方案直接裁切图片，最大程度避免性能损耗
+如果想要将`View`截图成`Bitmap`，在`Android 8.0`及以上系统中我们可以使用`PixelCopy`，此时使用`CardView`或`Outline`裁切的圆角不会有任何问题，而在`Android 8.0`以下的系统中，通常我们是构建一个带`Bitmap`的`Canvas`，然后对要截图的`View`调用`draw`方法达成截图效果，而在这种情况下，使用`CardView`或`Outline`裁切的圆角便会出现无效的情况（截图出来的`Bitmap`中，圆角没了），这种情况的出现似乎也和硬件加速有关，针对这种问题，如果是图片圆角的情况，建议直接使用`BitmapShader`方案，这样无论使用哪种方式截图都不会出现问题
+
+这里顺便把截图的代码也贴一下吧
+
+```kotlin
+fun View.screenshot(activity: Activity?, onSuccess: (Bitmap) -> Unit) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && activity != null) {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+
+        val locationOfViewInWindow = IntArray(2)
+        this.getLocationInWindow(locationOfViewInWindow)
+
+        PixelCopy.request(
+            activity.window,
+            Rect(
+                locationOfViewInWindow[0],
+                locationOfViewInWindow[1],
+                locationOfViewInWindow[0] + width,
+                locationOfViewInWindow[1] + height
+            ),
+            bitmap, { copyResult ->
+                if (copyResult == PixelCopy.SUCCESS) {
+                    onSuccess(bitmap)
+                } else {
+                    screenshotBackup(onSuccess)
+                }
+            },
+            Handler(Looper.getMainLooper())
+        )
+    } else {
+        screenshotBackup(onSuccess)
+    }
+}
+
+private fun View.screenshotBackup(onSuccess: (Bitmap) -> Unit) {
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    draw(canvas)
+    onSuccess(bitmap)
+}
+```
 
 # 总结
 
-以上就是我本人目前对`Android`实现不同大小的圆角的一些想法和遇到的问题，至于`CardView`嵌套会不会带来什么性能问题，我目前并没有做验证，各位小伙伴有什么更好的解决方案，欢迎在评论区指出，大家一起集思广益
+以上就是我本人目前对`Android`实现不同大小的圆角的一些想法和遇到的问题，至于`CardView`嵌套会不会带来什么性能问题，我用`BitmapShader`方案做了一下对比，不管加载速度，还是内存占用，都没有发现明显差别（甚至用`CardView`嵌套速度还快点？），所以各位不用担心性能问题，选适合自己的方案就行了，各位小伙伴有什么更好的解决方案，欢迎在评论区指出，大家一起集思广益
