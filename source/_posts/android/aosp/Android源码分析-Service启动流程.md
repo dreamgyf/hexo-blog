@@ -17,9 +17,17 @@ categories:
 
 在之前的文章中，我们已经分析过了四大组件中`Activity`和`ContentProvider`的启动流程，这次我们就来讲讲四大组件之一的`Service`是如何启动和绑定的
 
+# 流程图
+
+在查阅资料的过程中，我发现有些博主会将梳理好的流程图贴在开头，我觉得这样有助于从宏观上去理解源码的整个流程和设计理念，所以以后的文章我都会尽量将源码梳理成流程图，以便大家理解
+
+![startService流程图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Service%E5%90%AF%E5%8A%A8%E6%B5%81%E7%A8%8B_startService%E6%B5%81%E7%A8%8B%E5%9B%BE.png)
+
+![bindService流程图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Service%E5%90%AF%E5%8A%A8%E6%B5%81%E7%A8%8B_bindService%E6%B5%81%E7%A8%8B%E5%9B%BE.png)
+
 # 入口
 
-启动`Service`有两种方式，一是`startService`，一是`bindService`，它们的实现都在`ContextImpl`中
+启动`Service`有两种方式，一是`startService`，一是`bindService`，它们最终的实现都在`ContextImpl`中
 
 ## Context.startService
 
@@ -400,6 +408,7 @@ ComponentName startServiceInnerLocked(ServiceMap smap, Intent service, ServiceRe
 在这个方法中，首先会调用`bringUpServiceLocked`方法拉起服务，然后根据服务是否为前台启动，分别调用`ServiceMap.rescheduleDelayedStartsLocked`和`ServiceMap.ensureNotStartingBackgroundLocked`方法从后台延迟启动服务列表`mDelayedStartList`中不断地调度启动服务
 
 ```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
 private String bringUpServiceLocked(ServiceRecord r, int intentFlags, boolean execInFg,
         boolean whileRestarting, boolean permissionsReviewRequired)
         throws TransactionTooLargeException {
@@ -1298,8 +1307,8 @@ int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
                                         serviceRecord.packageName,
                                         serviceRecord.userId)) {
                             try {
-                                //拉起服务，如果服务未启动，则会启动服务并调用其onCreate方法
-                                //如果服务已启动则什么都不会做
+                                //拉起服务，如果服务未创建，则会创建服务并调用其onCreate方法
+                                //如果服务已创建则什么都不会做
                                 bringUpServiceLocked(serviceRecord,
                                         serviceIntent.getFlags(),
                                         callerFg, false, false);
@@ -1413,8 +1422,8 @@ int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
         //绑定存在就会自动创建服务
         if ((flags&Context.BIND_AUTO_CREATE) != 0) {
             s.lastActivity = SystemClock.uptimeMillis();
-            //拉起服务，如果服务未启动，则会启动服务并调用其onCreate方法
-            //如果服务已启动则什么都不会做
+            //拉起服务，如果服务未创建，则会创建服务并调用其onCreate方法
+            //如果服务已创建则什么都不会做
             if (bringUpServiceLocked(s, service.getFlags(), callerFg, false,
                     permissionsReviewRequired) != null) {
                 return 0;
@@ -1496,7 +1505,7 @@ int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
 
 - 向各个连接记录类中添加`ConnectionRecord`连接信息
 
-- 如果`flags`设置了`BIND_AUTO_CREATE`便会调用`bringUpServiceLocked`方法尝试拉起服务，如果服务未启动，则会启动服务并调用其`onCreate`方法，如果服务已启动，则什么都不会做：这里和`startService`路径一样都调用到了`bringUpServiceLocked`方法，但最终调用的结果却不太一样，这是因为`startService`路径中，`ServiceRecord.startRequested`为`true`并且向`ServiceRecord.pendingStarts`中添加了启动项，而`bindService`路径不会向`ServiceRecord.pendingStarts`中添加启动项，并且由于`ServiceRecord.startRequested`为`false`，因此也不会去添加假的启动项，所以和`startService`不同，最终不会回调`Service.onStartCommand`方法
+- 如果`flags`设置了`BIND_AUTO_CREATE`便会调用`bringUpServiceLocked`方法尝试拉起服务，如果服务未创建，则会创建服务并调用其`onCreate`方法，如果服务已创建，则什么都不会做：这里和`startService`路径一样都调用到了`bringUpServiceLocked`方法，但最终调用的结果却不太一样，这是因为`startService`路径中，`ServiceRecord.startRequested`为`true`并且向`ServiceRecord.pendingStarts`中添加了启动项，而`bindService`路径不会向`ServiceRecord.pendingStarts`中添加启动项，并且由于`ServiceRecord.startRequested`为`false`，因此也不会去添加假的启动项，所以和`startService`不同，最终不会回调`Service.onStartCommand`方法
 
 - 如果服务之前就已经在运行，则表示`Service.onBind`方法已经被执行，返回的`IBinder`对象也已经被保存，此时直接调用`LoadedApk$ServiceDispatcher$InnerConnection.connected`方法，在这个方法中会回调`ServiceConnection.onServiceConnected`方法
 
@@ -1504,7 +1513,7 @@ int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
 
 - 最后调用`ActiveServices$ServiceMap.ensureNotStartingBackgroundLocked`方法继续调度后台`Service`的启动
 
-`bringUpServiceLocked`方法我们之前已经分析过了，我们接下来看服务第一次启动所要调用的`requestServiceBindingLocked`方法
+`bringUpServiceLocked`方法我们之前已经分析过了，我们接下来看服务创建后所要调用的`requestServiceBindingLocked`方法
 
 ```java
 //frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
@@ -1702,6 +1711,7 @@ public void doConnected(ComponentName name, IBinder service, boolean dead) {
             return;
         }
         old = mActiveConnections.get(name);
+        //如果旧的连接信息中的IBinder对象和本次调用传入的IBinder对象是同一个对象
         if (old != null && old.binder == service) {
             // Huh, already have this one.  Oh well!
             return;
@@ -1709,42 +1719,60 @@ public void doConnected(ComponentName name, IBinder service, boolean dead) {
 
         if (service != null) {
             // A new service is being connected... set it all up.
+            //建立一个新的连接信息
             info = new ConnectionInfo();
             info.binder = service;
             info.deathMonitor = new DeathMonitor(name, service);
             try {
+                //注册Binder死亡通知
                 service.linkToDeath(info.deathMonitor, 0);
+                //保存本次连接信息
                 mActiveConnections.put(name, info);
             } catch (RemoteException e) {
                 // This service was dead before we got it...  just
                 // don't do anything with it.
+                //服务已死亡，移除连接信息
                 mActiveConnections.remove(name);
                 return;
             }
-
         } else {
             // The named service is being disconnected... clean up.
             mActiveConnections.remove(name);
         }
 
+        //移除Binder死亡通知
         if (old != null) {
             old.binder.unlinkToDeath(old.deathMonitor, 0);
         }
     }
 
     // If there was an old service, it is now disconnected.
+    //回调ServiceConnection.onServiceDisconnected
+    //通知client之前的连接已被断开
     if (old != null) {
         mConnection.onServiceDisconnected(name);
     }
+    //如果Service死亡需要回调ServiceConnection.onBindingDied通知client服务死亡
     if (dead) {
         mConnection.onBindingDied(name);
     }
     // If there is a new viable service, it is now connected.
     if (service != null) {
+        //回调ServiceConnection.onServiceConnected方法
+        //告知client已建立连接
         mConnection.onServiceConnected(name, service);
     } else {
         // The binding machinery worked, but the remote returned null from onBind().
+        //当Service.onBind方法返回null时，回调ServiceConnection.onNullBinding方法
         mConnection.onNullBinding(name);
     }
 }
 ```
+
+可以看到，在这个方法里最终执行了`ServiceConnection.onServiceConnected`回调，通知客户端已与`Service`建立连接
+
+至此，整个`bindService`的流程就结束了
+
+# 总结
+
+`Service`的整个启动流程到这里基本上都分析完了，至于`Service`的停止，重建等流程，我将会在后面的文章中再慢慢分析
