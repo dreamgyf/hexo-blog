@@ -80,8 +80,8 @@ public void setText(CharSequence text, BufferType type) {
     super.setText(text, type);
     //执行父类构造函数时，如果AttributeSet中有text参数会先调用setText，此时mTextView尚未初始化
     if (mTextView != null) {
-	mTextView.setText(text);
-	requestLayout();
+        mTextView.setText(text);
+        requestLayout();
     }
 }
 
@@ -90,8 +90,8 @@ public void setTextSize(int unit, float size) {
     super.setTextSize(unit, size);
     //执行父类构造函数时，如果AttributeSet中有textSize参数会先调用setTextSize，此时mTextView尚未初始化
     if (mTextView != null) {
-	mTextView.setTextSize(size);
-	requestLayout();
+        mTextView.setTextSize(size);
+        requestLayout();
     }
 }
 ```
@@ -105,7 +105,7 @@ public void setTextSize(int unit, float size) {
 protected void onDraw(Canvas canvas) {
     if (mBitmap != null) {
         //当文字内容不超过一行
-	if (mTextView.getMeasuredWidth() <= getWidth()) {
+        if (mTextView.getMeasuredWidth() <= getWidth()) {
             //计算头尾需要间隔的宽度
             int space = mSpace - (getWidth() - mTextView.getMeasuredWidth());
             if (space < 0) {
@@ -123,11 +123,11 @@ protected void onDraw(Canvas canvas) {
                 //画右边的bitmap，位置为最右边的坐标-左边bitmap已消失的宽度+间隔宽度
                 canvas.drawBitmap(mBitmap, getWidth() + mLeftX + space, 0, getPaint());
             }
-	} else {
+        } else {
             //当文字内容超过一行
             //当左边的drawBitmap的坐标超过了内容宽度+间隔宽度，即走完一个循环，右边的Bitmap已经挪到了最左边，将坐标重置
             if (mLeftX < -mTextView.getMeasuredWidth() - mSpace) {
-		mLeftX += mTextView.getMeasuredWidth() + mSpace;
+                mLeftX += mTextView.getMeasuredWidth() + mSpace;
             }
 
             //画左边的bitmap
@@ -135,9 +135,9 @@ protected void onDraw(Canvas canvas) {
             //当尾部已经显示出来的时候
             if (mLeftX + (mTextView.getMeasuredWidth() - getWidth()) < 0) {
                 //画右边的bitmap，位置为尾部的坐标+间隔宽度
-		canvas.drawBitmap(mBitmap, mTextView.getMeasuredWidth() + mLeftX + mSpace, 0, getPaint());
+                canvas.drawBitmap(mBitmap, mTextView.getMeasuredWidth() + mLeftX + mSpace, 0, getPaint());
             }
-	}
+        }
     }
 }
 ```
@@ -150,9 +150,9 @@ protected void onDraw(Canvas canvas) {
 private final Runnable mMarqueeRunnable = new Runnable() {
     @Override
     public void run() {
-	invalidate();
-	mLeftX -= mSpeed;
-	mHandler.postDelayed(this, 15);
+        invalidate();
+        mLeftX -= mSpeed;
+        mHandler.postDelayed(this, 15);
     }
 };
 
