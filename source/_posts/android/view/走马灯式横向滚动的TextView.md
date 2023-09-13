@@ -144,29 +144,48 @@ protected void onDraw(Canvas canvas) {
 
 这就是基本的绘制思路
 
-接下来需要让他动起来，我这里使用的是Handler，每隔一段时间更新一下坐标并重绘
+接下来需要让他动起来，这里使用的`Choreographer`，每次收到`Vsync`信号系统绘制新帧时都更新一下坐标并重绘
 
 ```java
-private final Runnable mMarqueeRunnable = new Runnable() {
+private static final float BASE_FPS = 60f;
+
+private float mFps = BASE_FPS;
+
+/**
+ * 获取当前屏幕刷新率
+ */
+private void updateFps() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+        mFps = context.getDisplay().getRefreshRate();
+    } else {
+        WindowManager windowManager =
+                (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        mFps = windowManager.getDefaultDisplay().getRefreshRate();
+    }
+}
+
+private Choreographer.FrameCallback frameCallback = new Choreographer.FrameCallback() {
     @Override
-    public void run() {
+    public void doFrame(long frameTimeNanos) {
         invalidate();
-        mLeftX -= mSpeed;
-        mHandler.postDelayed(this, 15);
+        //保证在不同刷新率的屏幕上，视觉上的速度一致
+        int speed = (int) (BASE_FPS / mFps * mSpeed);
+        mLeftX -= speed;
+        Choreographer.getInstance().postFrameCallback(this);
     }
 };
 
 public void startScroll() {
-    mHandler.post(mMarqueeRunnable);
+    Choreographer.getInstance().postFrameCallback(frameCallback);
 }
 
 public void pauseScroll() {
-    mHandler.removeCallbacks(mMarqueeRunnable);
+    Choreographer.getInstance().removeFrameCallback(frameCallback);
 }
 
 public void stopScroll() {
     mLeftX = 0;
-    mHandler.removeCallbacks(mMarqueeRunnable);
+    Choreographer.getInstance().removeFrameCallback(frameCallback);
 }
 
 public void restartScroll() {
@@ -175,12 +194,16 @@ public void restartScroll() {
 }
 ```
 
-最后，在View移除Window时，把HandlerMessage取消掉
+最后，在`View`可见性发生变化时，需要控制一下动画的启停
 
 ```java
 @Override
-protected void onDetachedFromWindow() {
-    super.onDetachedFromWindow();
-    mHandler.removeCallbacksAndMessages(null);
+protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
+    if (visibility == VISIBLE) {
+        updateFps();
+        Choreographer.getInstance().postFrameCallback(frameCallback);
+    } else {
+        Choreographer.getInstance().removeFrameCallback(frameCallback);
+    }
 }
 ```
