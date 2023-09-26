@@ -1572,7 +1572,6 @@ public final void scheduleBindService(IBinder token, Intent intent,
 }
 ```
 
-
 将绑定`Service`的必要信息包装成`BindServiceData`对象后，通过`Handler`依次发送`Message`处理服务启动，这里最终调用的是`ActivityThread.handleBindService`方法
 
 ```java
