@@ -1009,4 +1009,214 @@ private void handleUnbindService(BindServiceData data) {
 }
 ```
 
+可以看到，这里回调了`Service.onUnbind`方法，它的返回值表示当`Service`后面再与其他客户端建立连接时，是否需要回调`Service.onRebind`方法，但是这有一个前提，那就是`Service`中途没有被停止，具体原因以及`rebind`流程我们稍后再分析
+
+到了这一步，解绑就完成了，接下来和之前在`stopSelf`章节里分析的后续流程就一样了，最终调用`ActivityThread.handleStopService`方法停止服务，还记得我们之前分析在这个方法中触发完`Service.onDestroy`回调，之后还需要调用`ContextImpl.scheduleFinalCleanup`方法吗？现在我们就来看看这个方法又做了什么事情
+
+```java
+//frameworks/base/core/java/android/app/ContextImpl.java
+final void scheduleFinalCleanup(String who, String what) {
+    mMainThread.scheduleContextCleanup(this, who, what);
+}
+```
+
+这里的`mMainThread`就是应用的`ActivityThread`
+
+```java
+//frameworks/base/core/java/android/app/ActivityThread.java
+final void scheduleContextCleanup(ContextImpl context, String who,
+        String what) {
+    ContextCleanupInfo cci = new ContextCleanupInfo();
+    cci.context = context;
+    cci.who = who;
+    cci.what = what;
+    sendMessage(H.CLEAN_UP_CONTEXT, cci);
+}
+```
+
+还是老样子通过`Handler`发消息，最终调用的是`ContextImpl.performFinalCleanup`方法
+
+```java
+//frameworks/base/core/java/android/app/ContextImpl.java
+final void performFinalCleanup(String who, String what) {
+    mPackageInfo.removeContextRegistrations(getOuterContext(), who, what);
+}
+```
+
+然后调用`LoadedApk.removeContextRegistrations`方法执行清理操作
+
+```java
+//frameworks/base/core/java/android/app/LoadedApk.java
+public void removeContextRegistrations(Context context,
+        String who, String what) {
+    ... //清理广播接收器
+
+    synchronized (mServices) {
+        ArrayMap<ServiceConnection, LoadedApk.ServiceDispatcher> smap =
+                mServices.remove(context);
+        if (smap != null) {
+            for (int i = 0; i < smap.size(); i++) {
+                LoadedApk.ServiceDispatcher sd = smap.valueAt(i);
+                ... //报告ServiceConnection泄露
+                try {
+                    ActivityManager.getService().unbindService(
+                            sd.getIServiceConnection());
+                } catch (RemoteException e) {
+                    throw e.rethrowFromSystemServer();
+                }
+                sd.doForget();
+            }
+        }
+        mUnboundServices.remove(context);
+    }
+}
+```
+
+可能看到这里，有很多小伙伴会有疑问，为什么之前已经清理过了，这里还要再进行清理、这里为什么会有`ServiceConnection`泄露、这里为什么还要再次`unbindService`？那我们需要注意了，这里被调用的对象到底是谁？其实是`Service`的`Context`，假设我们在`Serivce`里调用`bindService`又绑定了一个其他`Service`，那这个`Service`被销毁后，它和另一个`Service`的连接怎么办？是不是就产生了泄露？为了防止这种情况，所以我们需要在`Service`销毁时调用一下这个方法解除它与其他`Service`的绑定
+
+而且这个方法不仅会在这里被调用到哦，在我们之前分析过的 [Android源码分析 - Activity销毁流程](https://juejin.cn/post/7216142711614799930) 中，也存在它的身影，当`Activity`被销毁，走到`handleDestroyActivity`方法时，会调用到我们`ContextImpl.scheduleFinalCleanup`方法，进行广播接收器的清理以及服务的解绑
+
+至此，`Service`的主动停止流程我们都分析完了，还有一些细枝末节的事情可以说一说
+
+# rebind流程
+
+之前我们说过，`rebind`的前提是`Service`中途没有被停止，为什么呢？带着疑问，我们来看之前没有分析的，当`Service.onUnbind`方法返回值为`true`时，会调用的`AMS.unbindFinished`方法
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+public void unbindFinished(IBinder token, Intent intent, boolean doRebind) {
+    // Refuse possible leaked file descriptors
+    if (intent != null && intent.hasFileDescriptors() == true) {
+        throw new IllegalArgumentException("File descriptors passed in Intent");
+    }
+
+    synchronized(this) {
+        mServices.unbindFinishedLocked((ServiceRecord)token, intent, doRebind);
+    }
+}
+```
+
+还是转交给`ActiveServices`去实现
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+void unbindFinishedLocked(ServiceRecord r, Intent intent, boolean doRebind) {
+    final long origId = Binder.clearCallingIdentity();
+    try {
+        if (r != null) {
+            Intent.FilterComparison filter
+                    = new Intent.FilterComparison(intent);
+            IntentBindRecord b = r.bindings.get(filter);
+
+            boolean inDestroying = mDestroyingServices.contains(r);
+            if (b != null) {
+                //服务unbind的前提就是IntentBindRecord.apps.size == 0
+                if (b.apps.size() > 0 && !inDestroying) {
+                    ...
+                } else {
+                    // Note to tell the service the next time there is
+                    // a new client.
+                    //将doRebind标记置为true，下一次再次建立连接时
+                    //服务会回调Service.onRebind方法
+                    b.doRebind = true;
+                }
+            }
+
+            serviceDoneExecutingLocked(r, inDestroying, false);
+        }
+    } finally {
+        Binder.restoreCallingIdentity(origId);
+    }
+}
+```
+
+根据我们之前的分析，我们知道，回调`Service.onUnbind`的前提就是这个`Service`没有任何连接与其绑定了，即`IntentBindRecord.apps.size == 0`，在这个case下，这个方法会将`IntentBindRecord`的`doRebind`变量置为`true`
+
+此时让我们再回顾一下上一篇文章 [Android源码分析 - Service启动流程](https://juejin.cn/post/7276363520554795064#heading-10) 中分析的`bindService`流程，在`ActiveServices.bindServiceLocked`方法中有这么一段代码
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
+        String resolvedType, final IServiceConnection connection, int flags,
+        String instanceName, String callingPackage, final int userId)
+        throws TransactionTooLargeException {
+    ...
+    if (s.app != null && b.intent.received) {
+        // Service is already running, so we can immediately
+        // publish the connection.
+        //如果服务之前就已经在运行，即Service.onBind方法已经被执行，返回的IBinder对象也已经被保存
+        //调用LoadedApk$ServiceDispatcher$InnerConnection.connected方法
+        //回调ServiceConnection.onServiceConnected方法
+        c.conn.connected(s.name, b.intent.binder, false);
+
+        // If this is the first app connected back to this binding,
+        // and the service had previously asked to be told when
+        // rebound, then do so.
+        //当服务解绑，调用到Service.onUnbind方法时返回true，此时doRebind变量就会被赋值为true
+        //此时，当再次建立连接时，服务会回调Service.onRebind方法
+        if (b.intent.apps.size() == 1 && b.intent.doRebind) {
+            requestServiceBindingLocked(s, b.intent, callerFg, true);
+        }
+    } else if (!b.intent.requested) {
+        //如果服务是因这次绑定而创建的
+        //请求执行Service.onBind方法，获取返回的IBinder对象
+        //发布Service，回调ServiceConnection.onServiceConnected方法
+        requestServiceBindingLocked(s, b.intent, callerFg, false);
+    }
+    ...
+}
+```
+
+如果`Service`被停止了，那么它相应的`ServiceRecord`会从缓存`mServicesByInstanceName`和`mServicesByIntent`中移除，那么等到重新启动`Service`时会新建出一个`ServiceRecord`，此时里面的变量全部被初始化，`b.intent.received == false`，`b.intent.requested == false`，`b.intent.doRebind == false`，在这种情况下，调用`requestServiceBindingLocked`方法的最后一个入参`rebind`为`false`，就会直接回调`Service.onBind`方法，而不会回调`Service.onRebind`方法
+
+如果`Service`没有被停止，且之前有被绑定过，那么`b.intent.received == true`，代表`IBinder`对象已获取到，此时如果之前的`Service.onUnbind`回调返回值为`true`，那么这里的`b.intent.doRebind`也为`true`，再加上如果这是`Service`断开所有连接后建立的第一次连接，即`b.intent.apps.size() == 1`，那么此时调用的`requestServiceBindingLocked`方法的最后一个入参`rebind`为`true`，就会直接回调`Service.onRebind`方法，而不会回调`Service.onBind`方法
+
 # 混合启动的Service该如何停止
+
+单一启动方式的`Service`的停止很简单，那么混合启动的`Service`该如何停止呢？
+
+何为混合启动？指的是通过`startService`方式启动`Service`并且以`BIND_AUTO_CREATE`标志调用`bindService`方法绑定`Service`，两者不分先后
+
+在上面的分析中，我们注意到，不管用哪种方式停止服务，最后都会走到`bringDownServiceIfNeededLocked`方法中，在这个方法里又会调用`isServiceNeededLocked`判断是否`Service`是否被需要，那被需要的条件是什么呢？`Service.startRequested`为`true`，并且没有标志为`BIND_AUTO_CREATE`的连接绑定，那么，只要不符合这两个条件，服务自然就可以被停止了
+
+没有标志为`BIND_AUTO_CREATE`的连接绑定这个简单，只需要把标记为`BIND_AUTO_CREATE`的连接全部解绑了就好，那么怎么让`Service.startRequested`为`false`呢？我们回顾一下之前对`stopSelf`和`stopService`的分析，在他们调用`bringDownServiceIfNeededLocked`方法之前，都会先将`Service.startRequested`设置为`false`，所以答案就很明显了：只要`unbindService`掉所有`BIND_AUTO_CREATE`的标志的连接，然后`stopService`就能停止掉混合启动的服务，当然你也可以先`stopService`，再`unbindService`掉所有`BIND_AUTO_CREATE`的标志的连接
+
+# 小测验
+
+经过以上一系列的分析，我给大家出几个小问题：
+
+1. 先通过`startService`启动服务，然后再用`BIND_AUTO_CREATE`标志`bindService`（连接1），此时，`Service`的生命周期是怎样的？`ServiceConnection`会回调哪些方法？
+
+2. 在上一题的基础上，再使用一个非`BIND_AUTO_CREATE`标志`bindService`（连接2），此时，`Service`的生命周期是怎样的？`ServiceConnection`会回调哪些方法？
+
+3. 此时，使用`unbindService`解绑连接1，会发生什么？`ServiceConnection`会回调哪些方法？
+
+4. 此时，使用`unbindService`解绑连接2，会发生什么？`ServiceConnection`会回调哪些方法？
+
+5. 接着，再使用连接1`bindService`，会发生什么？`ServiceConnection`会回调哪些方法？
+
+6. 然后，调用`stopService`停止服务，服务真的会被停止吗？`Service`的生命周期是怎样的？连接1的`ServiceConnection`会回调哪些方法？
+
+7. 紧接着，再使用连接2`bindService`，会发生什么？连接2的`ServiceConnection`会回调哪些方法？
+
+8. 最后，调用`unbindService`解绑连接1，会发生什么？`Service`的生命周期是怎样的？`ServiceConnection`会回调哪些方法？
+
+请大家思考片刻，可以去回顾之前的`Service`启动分析以及停止流程分析，如果以上问题能全部回答正确，证明你对`Service`已经有了一个很深刻的理解，接下来揭晓答案：
+
+1. 生命周期：`onCreate` -> `onStartCommand` -> `onBind`，如果`onBind`的返回值不为`null`，`ServiceConnection`会回调`onServiceConnected`方法，如果`onBind`的返回值为`null`，`ServiceConnection`会回调`onNullBinding`方法
+
+2. 生命周期不会发生变化，如果`onBind`的返回值不为`null`，`ServiceConnection`会回调`onServiceConnected`方法，如果`onBind`的返回值为`null`，`ServiceConnection`会回调`onNullBinding`方法
+
+3. 生命周期不会发生变化，`ServiceConnection`不会回调任何方法
+
+4. 生命周期：`onUnbind`，`ServiceConnection`不会回调任何方法
+
+5. 生命周期：`onRebind`，如果之前`onBind`的返回值不为`null`，`ServiceConnection`会回调`onServiceConnected`方法，如果之前`onBind`的返回值为`null`，`ServiceConnection`会回调`onNullBinding`方法
+
+6. 不会真的被停止，生命周期不会发生变化，`ServiceConnection`不会回调任何方法
+
+7. 生命周期不会发生变化，如果之前`onBind`的返回值不为`null`，`ServiceConnection`会回调`onServiceConnected`方法，如果之前`onBind`的返回值为`null`，`ServiceConnection`会回调`onNullBinding`方法
+
+8. 服务会被停止，生命周期：`onUnbind` -> `onDestroy`，连接1的`ServiceConnection`不会回调任何方法，如果之前`onBind`的返回值不为`null`，连接2的`ServiceConnection`会回调`onServiceDisconnected`、`onBindingDied`以及`onNullBinding`方法，如果之前`onBind`的返回值为`null`，连接2的`ServiceConnection`会回调`onBindingDied`以及`onNullBinding`方法
+
+# 被动停止
