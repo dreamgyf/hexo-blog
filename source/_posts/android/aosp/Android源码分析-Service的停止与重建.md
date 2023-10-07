@@ -1211,7 +1211,7 @@ int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
 
 4. 生命周期：`onUnbind`，`ServiceConnection`不会回调任何方法
 
-5. 生命周期：`onRebind`，如果之前`onBind`的返回值不为`null`，`ServiceConnection`会回调`onServiceConnected`方法，如果之前`onBind`的返回值为`null`，`ServiceConnection`会回调`onNullBinding`方法
+5. 如果之前`onUnbind`的返回值为`true`，则生命周期为：`onRebind`，否则生命周期不会发生变化，如果之前`onBind`的返回值不为`null`，`ServiceConnection`会回调`onServiceConnected`方法，如果之前`onBind`的返回值为`null`，`ServiceConnection`会回调`onNullBinding`方法
 
 6. 不会真的被停止，生命周期不会发生变化，`ServiceConnection`不会回调任何方法
 
@@ -1220,3 +1220,227 @@ int bindServiceLocked(IApplicationThread caller, IBinder token, Intent service,
 8. 服务会被停止，生命周期：`onUnbind` -> `onDestroy`，连接1的`ServiceConnection`不会回调任何方法，如果之前`onBind`的返回值不为`null`，连接2的`ServiceConnection`会回调`onServiceDisconnected`、`onBindingDied`以及`onNullBinding`方法，如果之前`onBind`的返回值为`null`，连接2的`ServiceConnection`会回调`onBindingDied`以及`onNullBinding`方法
 
 # 被动停止
+
+`Service`除了主动停止，还会因为各种情况导致被动停止
+
+## 用户手动从最近任务移除Task
+
+注：由于各家系统对进程或任务调度策略不同，所以这里的`Task`移除逻辑和`Service`停止逻辑可能会有些许不同，我们还是以原生`Android`为准分析
+
+不管用户是从最近任务划走了一个`Task`，还是点击了全部清除，最终都会走到`ActivityStackSupervisor.removeTaskById`方法
+
+```java
+//frameworks/base/services/core/java/com/android/server/wm/ActivityStackSupervisor.java
+boolean removeTaskById(int taskId, boolean killProcess, boolean removeFromRecents,
+        String reason) {
+    //通过id查询Task
+    final Task task =
+            mRootWindowContainer.anyTaskForId(taskId, MATCH_TASK_IN_STACKS_OR_RECENT_TASKS);
+    if (task != null) {
+        removeTask(task, killProcess, removeFromRecents, reason);
+        return true;
+    }
+    return false;
+}
+```
+
+这里的入参，`killProcess`为`true`，如果是移除单一`Task`，那么`removeFromRecents`为`true`，如果是清除全部`Task`，那么`removeFromRecents`为`false`
+
+先通过`id`，使用`RootWindowContainer`查询相应的`Task`，然后再调用`removeTask`方法继续移除`Task`
+
+```java
+//frameworks/base/services/core/java/com/android/server/wm/ActivityStackSupervisor.java
+void removeTask(Task task, boolean killProcess, boolean removeFromRecents, String reason) {
+    //如果Task正在清理中则直接返回
+    if (task.mInRemoveTask) {
+        // Prevent recursion.
+        return;
+    }
+    //标记Task正在清理中
+    task.mInRemoveTask = true;
+    try {
+        //销毁此Task下所有Activity
+        task.performClearTask(reason);
+        //清理Task
+        cleanUpRemovedTaskLocked(task, killProcess, removeFromRecents);
+        //关闭屏幕固定
+        mService.getLockTaskController().clearLockedTask(task);
+        //通知任务栈发生变化
+        mService.getTaskChangeNotificationController().notifyTaskStackChanged();
+        //启动任务持久化程序，将任何挂起的任务写入磁盘
+        if (task.isPersistable) {
+            mService.notifyTaskPersisterLocked(null, true);
+        }
+    } finally {
+        //取消标记
+        task.mInRemoveTask = false;
+    }
+}
+```
+
+这个方法最重要的有两个部分，一个是销毁此`Task`下所有`Activity`，对于我们本次而言不需要关注，另一个是调用`cleanUpRemovedTaskLocked`继续清理`Task`
+
+```java
+void cleanUpRemovedTaskLocked(Task task, boolean killProcess, boolean removeFromRecents) {
+    //从最近任务列表中移除
+    //对于清除全部Task而言，之前在RecentTasks中已经进行过移除操作了
+    //所以传入的removeFromRecents为false
+    if (removeFromRecents) {
+        mRecentTasks.remove(task);
+    }
+    ComponentName component = task.getBaseIntent().getComponent();
+    if (component == null) {
+        return;
+    }
+
+    // Find any running services associated with this app and stop if needed.
+    //清理和此Task有关联的服务
+    final Message msg = PooledLambda.obtainMessage(ActivityManagerInternal::cleanUpServices,
+            mService.mAmInternal, task.mUserId, component, new Intent(task.getBaseIntent()));
+    mService.mH.sendMessage(msg);
+
+    //如果不需要杀死进程，到这里就为止了
+    if (!killProcess) {
+        return;
+    }
+
+    // Determine if the process(es) for this task should be killed.
+    final String pkg = component.getPackageName();
+    ArrayList<Object> procsToKill = new ArrayList<>();
+    ArrayMap<String, SparseArray<WindowProcessController>> pmap = 
+            mService.mProcessNames.getMap();
+    //遍历App进程，确定要杀死的进程
+    for (int i = 0; i < pmap.size(); i++) {
+        SparseArray<WindowProcessController> uids = pmap.valueAt(i);
+        for (int j = 0; j < uids.size(); j++) {
+            WindowProcessController proc = uids.valueAt(j);
+            //不要杀死其他用户下的进程
+            if (proc.mUserId != task.mUserId) {
+                // Don't kill process for a different user.
+                continue;
+            }
+            //不要杀死首页进程
+            //HomeProcess指的是含有分类为android.intent.category.HOME的进程
+            //也就是能成为首页Launcher的进程
+            if (proc == mService.mHomeProcess) {
+                // Don't kill the home process along with tasks from the same package.
+                continue;
+            }
+            //不要杀死和这个Task无关的进程
+            if (!proc.mPkgList.contains(pkg)) {
+                // Don't kill process that is not associated with this task.
+                continue;
+            }
+
+            //如果这个进程有Activity在不同的Task里，并且这个Task也在最近任务里
+            //或者有Activity还没有被停止，则不要杀死进程
+            if (!proc.shouldKillProcessForRemovedTask(task)) {
+                // Don't kill process(es) that has an activity in a different task that is also
+                // in recents, or has an activity not stopped.
+                return;
+            }
+
+            //有前台服务的话不要杀死进程
+            if (proc.hasForegroundServices()) {
+                // Don't kill process(es) with foreground service.
+                return;
+            }
+
+            // Add process to kill list.
+            procsToKill.add(proc);
+        }
+    }
+
+    // Kill the running processes. Post on handle since we don't want to hold the service lock
+    // while calling into AM.
+    //杀死进程
+    final Message m = PooledLambda.obtainMessage(
+            ActivityManagerInternal::killProcessesForRemovedTask, mService.mAmInternal,
+            procsToKill);
+    mService.mH.sendMessage(m);
+}
+```
+
+这个方法主要做两件事，一是清理和此`Task`有关联的服务，二是杀死应该杀死的进程
+
+清理服务这一步用到了池化技术，这里大家不用管，就当做调用了`mService.mAmInternal.cleanUpServices`即可，这里的`mService.mAmInternal`是`AMS`里的一个内部类`LocalService`
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+public void cleanUpServices(int userId, ComponentName component, Intent baseIntent) {
+    synchronized(ActivityManagerService.this) {
+        mServices.cleanUpServices(userId, component, baseIntent);
+    }
+}
+```
+
+同样，关于`Service`的工作都转交给`ActiveServices`
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+void cleanUpServices(int userId, ComponentName component, Intent baseIntent) {
+    ArrayList<ServiceRecord> services = new ArrayList<>();
+    //获得此用户下所有的活动Service
+    ArrayMap<ComponentName, ServiceRecord> alls = getServicesLocked(userId);
+    //筛选出此Task下的所有活动Service
+    for (int i = alls.size() - 1; i >= 0; i--) {
+        ServiceRecord sr = alls.valueAt(i);
+        if (sr.packageName.equals(component.getPackageName())) {
+            services.add(sr);
+        }
+    }
+
+    // Take care of any running services associated with the app.
+    for (int i = services.size() - 1; i >= 0; i--) {
+        ServiceRecord sr = services.get(i);
+        if (sr.startRequested) {
+            if ((sr.serviceInfo.flags&ServiceInfo.FLAG_STOP_WITH_TASK) != 0) {
+                //如果在manifest里设置了stopWithTask，那么会直接停止Service
+                stopServiceLocked(sr);
+            } else {
+                //如果没有设置stopWithTask的话，则会回调Service.onTaskRemoved方法
+                sr.pendingStarts.add(new ServiceRecord.StartItem(sr, true,
+                        sr.getLastStartId(), baseIntent, null, 0));
+                if (sr.app != null && sr.app.thread != null) {
+                    // We always run in the foreground, since this is called as
+                    // part of the "remove task" UI operation.
+                    try {
+                        sendServiceArgsLocked(sr, true, false);
+                    } catch (TransactionTooLargeException e) {
+                        // Ignore, keep going.
+                    }
+                }
+            }
+        }
+    }
+}
+```
+
+首先要获取到所有需要清理的`Service`记录，然后再对它们进行处理
+
+对于在`manifest`文件里设置了`stopWithTask`标识的`Service`，直接调用`stopServiceLocked`方法停止服务，而对于没有这个标识的`Service`，则是增加一个启动项，接着调用`sendServiceArgsLocked`处理这个启动项
+
+我们观察这个启动项的构建，第二个参数为`true`，我们可以去这个类的构造方法那里看到，第二个参数的名字为`_taskRemoved`，意思很明显了，然后根据我们在上一篇文章 [Android源码分析 - Service启动流程](https://juejin.cn/post/7276363520554795064#heading-9) 中分析的`sendServiceArgsLocked`方法可以知道，它最终会走到`ActivityThread.handleServiceArgs`方法中
+
+```java
+//frameworks/base/core/java/android/app/ActivityThread.java
+private void handleServiceArgs(ServiceArgsData data) {
+    ...
+    int res;
+    if (!data.taskRemoved) {
+        //正常情况调用
+        res = s.onStartCommand(data.args, data.flags, data.startId);
+    } else {
+        //用户关闭Task栈时调用
+        s.onTaskRemoved(data.args);
+        res = Service.START_TASK_REMOVED_COMPLETE;
+    }
+    ...
+}
+```
+
+可以发现，当`taskRemoved`变量为`true`时，会回调`Service.onTaskRemoved`方法
+
+我们接着回到`cleanUpRemovedTaskLocked`方法中，当它清理完服务后，便会尝试杀死进程，这里面其他的判断条件我们都不用管，我们只需要关心其中的一段，有前台服务的话不要杀死进程
+
+以上是我根据`AOSP`源码分析得出的结果，在模拟器上也验证通过，但在我的小米MIX4上表现却完全不是这样，大家开发时还是要以实际为准
