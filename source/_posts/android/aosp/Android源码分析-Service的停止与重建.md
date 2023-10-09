@@ -1444,3 +1444,420 @@ private void handleServiceArgs(ServiceArgsData data) {
 我们接着回到`cleanUpRemovedTaskLocked`方法中，当它清理完服务后，便会尝试杀死进程，这里面其他的判断条件我们都不用管，我们只需要关心其中的一段，有前台服务的话不要杀死进程
 
 以上是我根据`AOSP`源码分析得出的结果，在模拟器上也验证通过，但在我的小米MIX4上表现却完全不是这样，大家开发时还是要以实际为准
+
+## 内存不足
+
+当内存不足时，系统会通过`OOM Killer`或`Low Memory Killer`等手段杀死各种进程，如果被杀死的进程里有`Service`正在运行，那自然也会被停止
+
+# 重建
+
+当`Service`所在进程被杀死后，根据`Service.onStartCommand`的返回值，系统会决定是否重建，怎么重建
+
+我们曾在之前的文章 [Android源码分析 - Activity启动流程（中）](https://juejin.cn/post/7172464885492613128#heading-7) 中提到过，当App启动时，`AMS`会为其注册一个App进程死亡回调`AppDeathRecipient`，当App进程死亡后便会回调其`binderDied`方法
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+private final class AppDeathRecipient implements IBinder.DeathRecipient {
+    final ProcessRecord mApp;
+    final int mPid;
+    final IApplicationThread mAppThread;
+
+    AppDeathRecipient(ProcessRecord app, int pid,
+            IApplicationThread thread) {
+        mApp = app;
+        mPid = pid;
+        mAppThread = thread;
+    }
+
+    @Override
+    public void binderDied() {
+        synchronized(ActivityManagerService.this) {
+            appDiedLocked(mApp, mPid, mAppThread, true, null);
+        }
+    }
+}
+```
+
+接着便会调用`appDiedLocked`方法处理进程死亡
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+final void appDiedLocked(ProcessRecord app, int pid, IApplicationThread thread,
+        boolean fromBinderDied, String reason) {
+    // First check if this ProcessRecord is actually active for the pid.
+    //检查pid所属ProcessRecord是否与传入ProcessRecord相符
+    synchronized (mPidsSelfLocked) {
+        ProcessRecord curProc = mPidsSelfLocked.get(pid);
+        if (curProc != app) {
+            return;
+        }
+    }
+
+    ... //记录电池统计信息
+
+    //如果App进程尚未死亡的话，杀死进程
+    if (!app.killed) {
+        if (!fromBinderDied) {
+            killProcessQuiet(pid);
+            mProcessList.noteAppKill(app, ApplicationExitInfo.REASON_OTHER,
+                    ApplicationExitInfo.SUBREASON_UNKNOWN, reason);
+        }
+        ProcessList.killProcessGroup(app.uid, pid);
+        app.killed = true;
+    }
+
+    // Clean up already done if the process has been re-started.
+    if (app.pid == pid && app.thread != null &&
+            app.thread.asBinder() == thread.asBinder()) {
+        //一般情况下非自动化测试，先置为true
+        boolean doLowMem = app.getActiveInstrumentation() == null;
+        boolean doOomAdj = doLowMem;
+        if (!app.killedByAm) { //不通过AMS杀死的进程，一般就是被 Low Memory Killer (LMK) 杀死的
+            ... //报告信息
+            //被LMK杀死，说明系统内存不足
+            mAllowLowerMemLevel = true;
+        } else { //通过AMS杀死的进程
+            // Note that we always want to do oom adj to update our state with the
+            // new number of procs.
+            mAllowLowerMemLevel = false;
+            //正常情况下非内存不足
+            doLowMem = false;
+        }
+        ... //事件记录
+        //继续处理App进程死亡
+        handleAppDiedLocked(app, false, true);
+
+        //调整进程优先级
+        if (doOomAdj) {
+            updateOomAdjLocked(OomAdjuster.OOM_ADJ_REASON_PROCESS_END);
+        }
+        //当因为内存不足而杀死App进程时
+        //调用App层各处的的onLowMemory方法，释放内存
+        if (doLowMem) {
+            doLowMemReportIfNeededLocked(app);
+        }
+    } else if (app.pid != pid) { //新进程已启动
+        // A new process has already been started.
+        ... //报告记录信息
+    }
+    ...
+}
+```
+
+这里的其他代码我们都不用关心，直接看`handleAppDiedLocked`方法继续处理App进程死亡
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+final void handleAppDiedLocked(ProcessRecord app,
+        boolean restarting, boolean allowRestart) {
+    ...
+    //清理进程的主要方法
+    boolean kept = cleanUpApplicationRecordLocked(app, restarting, allowRestart, -1,
+            false /*replacingPid*/);
+    ...
+}
+
+final boolean cleanUpApplicationRecordLocked(ProcessRecord app,
+        boolean restarting, boolean allowRestart, int index, boolean replacingPid) {
+    ...
+    mServices.killServicesLocked(app, allowRestart);
+    ...
+}
+```
+
+可以看到，这里调用了`ActiveServices.killServicesLocked`方法停止还在运行中的服务
+
+```java
+final void killServicesLocked(ProcessRecord app, boolean allowRestart) {
+    // Clean up any connections this application has to other services.
+    //清理所有连接
+    for (int i = app.connections.size() - 1; i >= 0; i--) {
+        ConnectionRecord r = app.connections.valueAt(i);
+        removeConnectionLocked(r, app, null);
+    }
+    updateServiceConnectionActivitiesLocked(app);
+    app.connections.clear();
+
+    app.whitelistManager = false;
+
+    // Clear app state from services.
+    //遍历所有正在运行中的服务
+    for (int i = app.numberOfRunningServices() - 1; i >= 0; i--) {
+        ServiceRecord sr = app.getRunningServiceAt(i);
+        synchronized (sr.stats.getBatteryStats()) {
+            sr.stats.stopLaunchedLocked();
+        }
+        if (sr.app != app && sr.app != null && !sr.app.isPersistent()) {
+            //记录服务已停止
+            sr.app.stopService(sr);
+            //更新绑定的客户端uids
+            sr.app.updateBoundClientUids();
+        }
+        sr.setProcess(null);
+        sr.isolatedProc = null;
+        sr.executeNesting = 0;
+        sr.forceClearTracker();
+        if (mDestroyingServices.remove(sr)) {
+            if (DEBUG_SERVICE) Slog.v(TAG_SERVICE, "killServices remove destroying " + sr);
+        }
+
+        final int numClients = sr.bindings.size();
+        for (int bindingi=numClients-1; bindingi>=0; bindingi--) {
+            IntentBindRecord b = sr.bindings.valueAt(bindingi);
+            //释放对服务Binder的引用
+            b.binder = null;
+            //重置
+            b.requested = b.received = b.hasBound = false;
+            // If this binding is coming from a cached process and is asking to keep
+            // the service created, then we'll kill the cached process as well -- we
+            // don't want to be thrashing around restarting processes that are only
+            // there to be cached.
+            ... //遍历客户端进程（实际上没做任何事）
+        }
+    }
+
+    ServiceMap smap = getServiceMapLocked(app.userId);
+
+    // Now do remaining service cleanup.
+    for (int i = app.numberOfRunningServices() - 1; i >= 0; i--) {
+        ServiceRecord sr = app.getRunningServiceAt(i);
+
+        // Unless the process is persistent, this process record is going away,
+        // so make sure the service is cleaned out of it.
+        //非持久化进程
+        if (!app.isPersistent()) {
+            //记录服务已停止
+            app.stopService(sr);
+            //更新绑定的客户端uids
+            app.updateBoundClientUids();
+        }
+
+        // Sanity check: if the service listed for the app is not one
+        // we actually are maintaining, just let it drop.
+        //一致性检查
+        final ServiceRecord curRec = smap.mServicesByInstanceName.get(sr.instanceName);
+        if (curRec != sr) {
+            if (curRec != null) {
+                Slog.wtf(TAG, "Service " + sr + " in process " + app
+                        + " not same as in map: " + curRec);
+            }
+            continue;
+        }
+
+        // Any services running in the application may need to be placed
+        // back in the pending list.
+        //允许重启，但Service崩溃的次数超出重试上限（默认为16），并且它不是系统应用
+        if (allowRestart && sr.crashCount >= mAm.mConstants.BOUND_SERVICE_MAX_CRASH_RETRY
+                && (sr.serviceInfo.applicationInfo.flags
+                    &ApplicationInfo.FLAG_PERSISTENT) == 0) {
+            ... //记录
+            //停止服务
+            bringDownServiceLocked(sr);
+        } else if (!allowRestart
+                || !mAm.mUserController.isUserRunning(sr.userId, 0)) {
+            //不允许重启或者服务进程所在用户不在运行，停止服务
+            bringDownServiceLocked(sr);
+        } else {
+            //尝试调度重启服务
+            final boolean scheduled = scheduleServiceRestartLocked(sr, true /* allowCancel */);
+
+            // Should the service remain running?  Note that in the
+            // extreme case of so many attempts to deliver a command
+            // that it failed we also will stop it here.
+            if (!scheduled) { //未调度重启
+                //停止服务
+                bringDownServiceLocked(sr);
+            } else if (sr.canStopIfKilled(false /* isStartCanceled */)) {
+                // Update to stopped state because the explicit start is gone. The service is
+                // scheduled to restart for other reason (e.g. connections) so we don't bring
+                // down it.
+                //将服务的启动状态更新为停止
+                sr.startRequested = false;
+                ... //记录
+            }
+        }
+    }
+
+    //不允许重启的话
+    if (!allowRestart) {
+        //停止所有服务
+        app.stopAllServices();
+        //清理绑定的客户端uids
+        app.clearBoundClientUids();
+
+        // Make sure there are no more restarting services for this process.
+        //确保这个进程不再会重启服务，清理所有待重启待启动的服务
+        for (int i=mRestartingServices.size()-1; i>=0; i--) {
+            ServiceRecord r = mRestartingServices.get(i);
+            if (r.processName.equals(app.processName) &&
+                    r.serviceInfo.applicationInfo.uid == app.info.uid) {
+                mRestartingServices.remove(i);
+                clearRestartingIfNeededLocked(r);
+            }
+        }
+        for (int i=mPendingServices.size()-1; i>=0; i--) {
+            ServiceRecord r = mPendingServices.get(i);
+            if (r.processName.equals(app.processName) &&
+                    r.serviceInfo.applicationInfo.uid == app.info.uid) {
+                mPendingServices.remove(i);
+            }
+        }
+    }
+
+    // Make sure we have no more records on the stopping list.
+    //清理所有停止中的服务
+    int i = mDestroyingServices.size();
+    while (i > 0) {
+        i--;
+        ServiceRecord sr = mDestroyingServices.get(i);
+        if (sr.app == app) {
+            sr.forceClearTracker();
+            mDestroyingServices.remove(i);
+        }
+    }
+
+    //清理所有执行中的服务
+    //这里的执行中指的是有事务正在运行，比如说正在停止过程中，不是指运行中
+    app.executingServices.clear();
+}
+```
+
+这里做了各种清理工作，客户端进程的清理呀，服务端进程的清理，然后就是`Service`重启的核心，`scheduleServiceRestartLocked`方法
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allowCancel) {
+    //系统正在关机，直接返回
+    if (mAm.mAtmInternal.isShuttingDown()) {
+        return false;
+    }
+
+    //一致性检查
+    ServiceMap smap = getServiceMapLocked(r.userId);
+    if (smap.mServicesByInstanceName.get(r.instanceName) != r) {
+        ServiceRecord cur = smap.mServicesByInstanceName.get(r.instanceName);
+        Slog.wtf(TAG, "Attempting to schedule restart of " + r
+                + " when found in map: " + cur);
+        return false;
+    }
+
+    final long now = SystemClock.uptimeMillis();
+
+    final String reason;
+    if ((r.serviceInfo.applicationInfo.flags
+            &ApplicationInfo.FLAG_PERSISTENT) == 0) { //对于非系统应用
+        //默认1000ms
+        long minDuration = mAm.mConstants.SERVICE_RESTART_DURATION;
+        //默认60s
+        long resetTime = mAm.mConstants.SERVICE_RESET_RUN_DURATION;
+        boolean canceled = false;
+
+        // Any delivered but not yet finished starts should be put back
+        // on the pending list.
+        final int N = r.deliveredStarts.size();
+        if (N > 0) {
+            for (int i=N-1; i>=0; i--) {
+                ServiceRecord.StartItem si = r.deliveredStarts.get(i);
+                si.removeUriPermissionsLocked();
+                if (si.intent == null) {
+                    // We'll generate this again if needed.
+                } else if (!allowCancel || (si.deliveryCount < ServiceRecord.MAX_DELIVERY_COUNT
+                        && si.doneExecutingCount < ServiceRecord.MAX_DONE_EXECUTING_COUNT)) {
+                    r.pendingStarts.add(0, si);
+                    long dur = SystemClock.uptimeMillis() - si.deliveredTime;
+                    dur *= 2;
+                    if (minDuration < dur) minDuration = dur;
+                    if (resetTime < dur) resetTime = dur;
+                } else {
+                    Slog.w(TAG, "Canceling start item " + si.intent + " in service "
+                            + r.shortInstanceName);
+                    canceled = true;
+                }
+            }
+            r.deliveredStarts.clear();
+        }
+
+        if (allowCancel) {
+            final boolean shouldStop = r.canStopIfKilled(canceled);
+            if (shouldStop && !r.hasAutoCreateConnections()) {
+                // Nothing to restart.
+                return false;
+            }
+            reason = (r.startRequested && !shouldStop) ? "start-requested" : "connection";
+        } else {
+            reason = "always";
+        }
+
+        r.totalRestartCount++;
+        if (r.restartDelay == 0) {
+            r.restartCount++;
+            r.restartDelay = minDuration;
+        } else if (r.crashCount > 1) {
+            r.restartDelay = mAm.mConstants.BOUND_SERVICE_CRASH_RESTART_DURATION
+                    * (r.crashCount - 1);
+        } else {
+            // If it has been a "reasonably long time" since the service
+            // was started, then reset our restart duration back to
+            // the beginning, so we don't infinitely increase the duration
+            // on a service that just occasionally gets killed (which is
+            // a normal case, due to process being killed to reclaim memory).
+            if (now > (r.restartTime+resetTime)) {
+                r.restartCount = 1;
+                r.restartDelay = minDuration;
+            } else {
+                r.restartDelay *= mAm.mConstants.SERVICE_RESTART_DURATION_FACTOR;
+                if (r.restartDelay < minDuration) {
+                    r.restartDelay = minDuration;
+                }
+            }
+        }
+
+        r.nextRestartTime = now + r.restartDelay;
+
+        // Make sure that we don't end up restarting a bunch of services
+        // all at the same time.
+        boolean repeat;
+        do {
+            repeat = false;
+            final long restartTimeBetween = mAm.mConstants.SERVICE_MIN_RESTART_TIME_BETWEEN;
+            for (int i=mRestartingServices.size()-1; i>=0; i--) {
+                ServiceRecord r2 = mRestartingServices.get(i);
+                if (r2 != r && r.nextRestartTime >= (r2.nextRestartTime-restartTimeBetween)
+                        && r.nextRestartTime < (r2.nextRestartTime+restartTimeBetween)) {
+                    r.nextRestartTime = r2.nextRestartTime + restartTimeBetween;
+                    r.restartDelay = r.nextRestartTime - now;
+                    repeat = true;
+                    break;
+                }
+            }
+        } while (repeat);
+
+    } else {
+        // Persistent processes are immediately restarted, so there is no
+        // reason to hold of on restarting their services.
+        r.totalRestartCount++;
+        r.restartCount = 0;
+        r.restartDelay = 0;
+        r.nextRestartTime = now;
+        reason = "persistent";
+    }
+
+    if (!mRestartingServices.contains(r)) {
+        r.createdFromFg = false;
+        mRestartingServices.add(r);
+        r.makeRestarting(mAm.mProcessStats.getMemFactorLocked(), now);
+    }
+
+    cancelForegroundNotificationLocked(r);
+
+    mAm.mHandler.removeCallbacks(r.restarter);
+    mAm.mHandler.postAtTime(r.restarter, r.nextRestartTime);
+    r.nextRestartTime = SystemClock.uptimeMillis() + r.restartDelay;
+    Slog.w(TAG, "Scheduling restart of crashed service "
+            + r.shortInstanceName + " in " + r.restartDelay + "ms for " + reason);
+    EventLog.writeEvent(EventLogTags.AM_SCHEDULE_SERVICE_RESTART,
+            r.userId, r.shortInstanceName, r.restartDelay);
+
+    return true;
+}
+```
