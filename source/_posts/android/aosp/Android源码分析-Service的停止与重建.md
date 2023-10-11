@@ -293,7 +293,7 @@ private final void bringDownServiceLocked(ServiceRecord r) {
         r.bindings.clear();
     }
 
-    //对于主动停止的Service，不需要重启 TODO
+    //对于主动停止的Service，不需要重启
     if (r.restarter instanceof ServiceRestarter) {
         ((ServiceRestarter)r.restarter).setService(null);
     }
@@ -1451,9 +1451,158 @@ private void handleServiceArgs(ServiceArgsData data) {
 
 # 重建
 
-当`Service`所在进程被杀死后，根据`Service.onStartCommand`的返回值，系统会决定是否重建，怎么重建
+当`Service`所在进程被杀死后，根据`Service.onStartCommand`的返回值，系统会决定是否重建，怎么重建。我们先把其可能的返回值以及产生的结果先列出来：
 
-我们曾在之前的文章 [Android源码分析 - Activity启动流程（中）](https://juejin.cn/post/7172464885492613128#heading-7) 中提到过，当App启动时，`AMS`会为其注册一个App进程死亡回调`AppDeathRecipient`，当App进程死亡后便会回调其`binderDied`方法
+- `START_STICKY_COMPATIBILITY`：`targetSdkVersion` < 5 (`Android 2.0`) 的App默认会返回这个，`Service`被杀后会被重建，但`onStartCommand`方法不会被执行
+- `START_STICKY`：`targetSdkVersion` >= 5 (`Android 2.0`) 的App默认会返回这个，`Service`被杀后会被重建，`onStartCommand`方法也会被执行，但此时`onStartCommand`方法的第一个参数`Intent`为`null`
+- `START_NOT_STICKY`：`Service`被杀后不会被重建
+- `START_REDELIVER_INTENT`：`Service`被杀后会被重建，`onStartCommand`方法也会被执行，此时`onStartCommand`方法的第一个参数`Intent`为`Service`被杀死前最后一次调用`onStartCommand`方法时传递的`Intent`
+
+对于其返回值我们需要先了解一下是怎么处理的，这需要回顾一下上一篇文章分析的`handleServiceArgs`方法了
+
+```java
+//frameworks/base/core/java/android/app/ActivityThread.java
+private void handleServiceArgs(ServiceArgsData data) {
+    Service s = mServices.get(data.token);
+    if (s != null) {
+        try {
+            ...
+            int res;
+            if (!data.taskRemoved) {
+                //正常情况调用
+                res = s.onStartCommand(data.args, data.flags, data.startId);
+            } else {
+                //用户关闭Task栈时调用
+                s.onTaskRemoved(data.args);
+                res = Service.START_TASK_REMOVED_COMPLETE;
+            }
+
+            //确保其他异步任务执行完成
+            QueuedWork.waitToFinish();
+
+            try {
+                //Service相关任务执行完成
+                //这一步会根据onStartCommand的返回值，调整Service死亡重建策略
+                //同时会把之前的启动超时定时器取消
+                ActivityManager.getService().serviceDoneExecuting(
+                        data.token, SERVICE_DONE_EXECUTING_START, data.startId, res);
+            } catch (RemoteException e) {
+                throw e.rethrowFromSystemServer();
+            }
+        } catch (Exception e) {
+            if (!mInstrumentation.onException(s, e)) {
+                throw new RuntimeException(
+                        "Unable to start service " + s
+                        + " with " + data.args + ": " + e.toString(), e);
+            }
+        }
+    }
+}
+```
+
+可以看到，这里从`Service.onStartCommand`得到返回值后以其作为参数调用了`AMS.serviceDoneExecuting`方法
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
+public void serviceDoneExecuting(IBinder token, int type, int startId, int res) {
+    synchronized(this) {
+        ...
+        mServices.serviceDoneExecutingLocked((ServiceRecord)token, type, startId, res);
+    }
+}
+```
+
+转交给了`ActiveServices.serviceDoneExecutingLocked`方法
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+void serviceDoneExecutingLocked(ServiceRecord r, int type, int startId, int res) {
+    boolean inDestroying = mDestroyingServices.contains(r);
+    if (r != null) {
+        if (type == ActivityThread.SERVICE_DONE_EXECUTING_START) {
+            // This is a call from a service start...  take care of
+            // book-keeping.
+            r.callStart = true;
+            switch (res) {
+                case Service.START_STICKY_COMPATIBILITY:
+                case Service.START_STICKY: {
+                    // We are done with the associated start arguments.
+                    r.findDeliveredStart(startId, false, true);
+                    // Don't stop if killed.
+                    r.stopIfKilled = false;
+                    break;
+                }
+                case Service.START_NOT_STICKY: {
+                    // We are done with the associated start arguments.
+                    r.findDeliveredStart(startId, false, true);
+                    if (r.getLastStartId() == startId) {
+                        // There is no more work, and this service
+                        // doesn't want to hang around if killed.
+                        r.stopIfKilled = true;
+                    }
+                    break;
+                }
+                case Service.START_REDELIVER_INTENT: {
+                    // We'll keep this item until they explicitly
+                    // call stop for it, but keep track of the fact
+                    // that it was delivered.
+                    ServiceRecord.StartItem si = r.findDeliveredStart(startId, false, false);
+                    if (si != null) {
+                        si.deliveryCount = 0;
+                        si.doneExecutingCount++;
+                        // Don't stop if killed.
+                        r.stopIfKilled = true;
+                    }
+                    break;
+                }
+                case Service.START_TASK_REMOVED_COMPLETE: {
+                    // Special processing for onTaskRemoved().  Don't
+                    // impact normal onStartCommand() processing.
+                    r.findDeliveredStart(startId, true, true);
+                    break;
+                }
+                default:
+                    throw new IllegalArgumentException(
+                            "Unknown service start result: " + res);
+            }
+            if (res == Service.START_STICKY_COMPATIBILITY) {
+                r.callStart = false;
+            }
+        } else if (type == ActivityThread.SERVICE_DONE_EXECUTING_STOP) {
+            ...
+        }
+        ...
+    } else { ... }
+}
+```
+
+我们就只看对`Service.onStartCommand`的返回值进行处理的部分
+
+首先，不管返回值是什么，都会调用`ServiceRecord.findDeliveredStart`方法，只不过入参不同
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ServiceRecord.java
+public StartItem findDeliveredStart(int id, boolean taskRemoved, boolean remove) {
+    final int N = deliveredStarts.size();
+    for (int i=0; i<N; i++) {
+        StartItem si = deliveredStarts.get(i);
+        if (si.id == id && si.taskRemoved == taskRemoved) {
+            if (remove) deliveredStarts.remove(i);
+            return si;
+        }
+    }
+
+    return null;
+}
+```
+
+前两个参数，不管返回值是什么，传进来的都是一样的，而第三个参数`remove`就不同了，当返回值为`START_REDELIVER_INTENT`的时候，它为`false`，其他情况都为`true`，意味着要删除这个已分发的启动项，`START_REDELIVER_INTENT`由于需要保留最后一次调用`onStartCommand`时的`Intent`，所以它不应该被删除
+
+接着我们回到`serviceDoneExecutingLocked`方法，可以发现，`START_STICKY`和`START_STICKY_COMPATIBILITY`情况下的`ServiceRecord.stopIfKilled`被置为了`false`，其他则被置为了`true`，这和我们之前对结果的描述不同啊？不是说好了返回`START_REDELIVER_INTENT`也会重启吗？这是因为`START_REDELIVER_INTENT`比较特殊，它的重启不需要看`stopIfKilled`这个标志位，这个等到我们后面分析到怎么判断是否应该停止服务时就知道了
+
+以上的内容我们先记下来，会在后面的重启流程中发挥作用
+
+然后我们来看进程死亡后会发生什么，我们曾在之前的文章 [Android源码分析 - Activity启动流程（中）](https://juejin.cn/post/7172464885492613128#heading-7) 中提到过，当App启动时，`AMS`会为其注册一个App进程死亡回调`AppDeathRecipient`，当App进程死亡后便会回调其`binderDied`方法
 
 ```java
 //frameworks/base/services/core/java/com/android/server/am/ActivityManagerService.java
@@ -1746,14 +1895,15 @@ private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allo
     final String reason;
     if ((r.serviceInfo.applicationInfo.flags
             &ApplicationInfo.FLAG_PERSISTENT) == 0) { //对于非系统应用
-        //默认1000ms
+        //服务至少要过多长时间才能重启，默认1000ms
         long minDuration = mAm.mConstants.SERVICE_RESTART_DURATION;
-        //默认60s
+        //服务被杀死重启后需要运行多长时间，默认60s
         long resetTime = mAm.mConstants.SERVICE_RESET_RUN_DURATION;
         boolean canceled = false;
 
         // Any delivered but not yet finished starts should be put back
         // on the pending list.
+        //对应着返回值为START_REDELIVER_INTENT的情况
         final int N = r.deliveredStarts.size();
         if (N > 0) {
             for (int i=N-1; i>=0; i--) {
@@ -1763,14 +1913,17 @@ private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allo
                     // We'll generate this again if needed.
                 } else if (!allowCancel || (si.deliveryCount < ServiceRecord.MAX_DELIVERY_COUNT
                         && si.doneExecutingCount < ServiceRecord.MAX_DONE_EXECUTING_COUNT)) {
+                    //如果该启动项的失败次数小于最大容忍次数
+                    //MAX_DELIVERY_COUNT默认为3
+                    //MAX_DONE_EXECUTING_COUNT默认为6
                     r.pendingStarts.add(0, si);
+                    //这种情况下延时是现在距离启动时间的两倍
                     long dur = SystemClock.uptimeMillis() - si.deliveredTime;
                     dur *= 2;
                     if (minDuration < dur) minDuration = dur;
                     if (resetTime < dur) resetTime = dur;
                 } else {
-                    Slog.w(TAG, "Canceling start item " + si.intent + " in service "
-                            + r.shortInstanceName);
+                    //如果该启动项的失败次数大于等于最大容忍次数
                     canceled = true;
                 }
             }
@@ -1778,9 +1931,11 @@ private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allo
         }
 
         if (allowCancel) {
+            //判断是否应该停止（只考虑非绑定启动的情况）
             final boolean shouldStop = r.canStopIfKilled(canceled);
             if (shouldStop && !r.hasAutoCreateConnections()) {
                 // Nothing to restart.
+                //如果应该停止，直接返回
                 return false;
             }
             reason = (r.startRequested && !shouldStop) ? "start-requested" : "connection";
@@ -1789,22 +1944,26 @@ private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allo
         }
 
         r.totalRestartCount++;
-        if (r.restartDelay == 0) {
+        if (r.restartDelay == 0) { //第一次重启的情况
             r.restartCount++;
             r.restartDelay = minDuration;
-        } else if (r.crashCount > 1) {
+        } else if (r.crashCount > 1) { //Service所在进程在Service运行过程中发生崩溃导致重启的话
+            //重启延时为 30min * (崩溃次数 - 1)
             r.restartDelay = mAm.mConstants.BOUND_SERVICE_CRASH_RESTART_DURATION
                     * (r.crashCount - 1);
-        } else {
+        } else { //非第一次重启的情况
             // If it has been a "reasonably long time" since the service
             // was started, then reset our restart duration back to
             // the beginning, so we don't infinitely increase the duration
             // on a service that just occasionally gets killed (which is
             // a normal case, due to process being killed to reclaim memory).
             if (now > (r.restartTime+resetTime)) {
+                //如果服务重启后运行达到了一定时间，则重启延时为
                 r.restartCount = 1;
                 r.restartDelay = minDuration;
             } else {
+                //如果服务重启后运行没有达到一定时间（短时间内又要重启）
+                //则增长重启延时，默认因子为4
                 r.restartDelay *= mAm.mConstants.SERVICE_RESTART_DURATION_FACTOR;
                 if (r.restartDelay < minDuration) {
                     r.restartDelay = minDuration;
@@ -1812,10 +1971,12 @@ private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allo
             }
         }
 
+        //确定重启时间
         r.nextRestartTime = now + r.restartDelay;
 
         // Make sure that we don't end up restarting a bunch of services
         // all at the same time.
+        //确保不会在同一时间启动大量服务
         boolean repeat;
         do {
             repeat = false;
@@ -1832,7 +1993,7 @@ private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allo
             }
         } while (repeat);
 
-    } else {
+    } else { //对于系统进程，立马重启
         // Persistent processes are immediately restarted, so there is no
         // reason to hold of on restarting their services.
         r.totalRestartCount++;
@@ -1842,22 +2003,87 @@ private final boolean scheduleServiceRestartLocked(ServiceRecord r, boolean allo
         reason = "persistent";
     }
 
+    //添加到重启列表中
     if (!mRestartingServices.contains(r)) {
         r.createdFromFg = false;
         mRestartingServices.add(r);
         r.makeRestarting(mAm.mProcessStats.getMemFactorLocked(), now);
     }
 
+    //取消前台服务通知
     cancelForegroundNotificationLocked(r);
 
+    //通过Handler调度重启
     mAm.mHandler.removeCallbacks(r.restarter);
     mAm.mHandler.postAtTime(r.restarter, r.nextRestartTime);
     r.nextRestartTime = SystemClock.uptimeMillis() + r.restartDelay;
-    Slog.w(TAG, "Scheduling restart of crashed service "
-            + r.shortInstanceName + " in " + r.restartDelay + "ms for " + reason);
-    EventLog.writeEvent(EventLogTags.AM_SCHEDULE_SERVICE_RESTART,
-            r.userId, r.shortInstanceName, r.restartDelay);
-
+    ... //事件记录
     return true;
 }
 ```
+
+这个方法主要做了几件事情，一是判断服务需不需要重启，二是计算服务的下次重启时间，最后通过`Handler`执行延时重启
+
+还记得我们前面说的当返回值为`START_REDELIVER_INTENT`时，不会从`ServiceRecord.deliveredStarts`中删除启动项吗？这里就体现出了这一点，遍历整个`deliveredStarts`列表，从中找出符合重启条件的启动项，将其加入到`pendingStarts`列表中，需要注意的是，在这种情况下，重启延时为现在距离启动时间的两倍，所以一般情况下`START_REDELIVER_INTENT`比`START_STICKY`重启的要更慢
+
+接下来便要判断服务需不需要重启，这里调用了`ServiceRecord.canStopIfKilled`方法
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ServiceRecord.java
+boolean canStopIfKilled(boolean isStartCanceled) {
+    return startRequested && (stopIfKilled || isStartCanceled) && pendingStarts.isEmpty();
+}
+```
+
+之前说过，如果返回值为`START_STICKY`或`START_STICKY_COMPATIBILITY`，那这里的`stopIfKilled`就为`false`，所以整体会返回`false`，而对于返回值`START_REDELIVER_INTENT`而言，之前已经进行过操作，将启动项添加到`pendingStarts`列表中了，所以只要这里为`false`，整体就为`false`，`stopIfKilled`的值就不重要了
+
+最后就是通过`Handler`执行延时重启了，这里`Handler`传入的`Runnable`是`ServiceRecord.restarter`，它是在服务启动，调用`retrieveServiceLocked`方法时被创建的
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+private class ServiceRestarter implements Runnable {
+    private ServiceRecord mService;
+
+    void setService(ServiceRecord service) {
+        mService = service;
+    }
+
+    public void run() {
+        synchronized(mAm) {
+            performServiceRestartLocked(mService);
+        }
+    }
+}
+```
+
+可以看到，在一定的延时后，会调用到`performServiceRestartLocked`方法重启服务
+
+```java
+//frameworks/base/services/core/java/com/android/server/am/ActiveServices.java
+final void performServiceRestartLocked(ServiceRecord r) {
+    if (!mRestartingServices.contains(r)) {
+        return;
+    }
+    if (!isServiceNeededLocked(r, false, false)) {
+        // Paranoia: is this service actually needed?  In theory a service that is not
+        // needed should never remain on the restart list.  In practice...  well, there
+        // have been bugs where this happens, and bad things happen because the process
+        // ends up just being cached, so quickly killed, then restarted again and again.
+        // Let's not let that happen.
+        Slog.wtf(TAG, "Restarting service that is not needed: " + r);
+        return;
+    }
+    try {
+        //参考上一篇文章，Service启动流程
+        bringUpServiceLocked(r, r.intent.getIntent().getFlags(), r.createdFromFg, true, false);
+    } catch (TransactionTooLargeException e) {
+        // Ignore, it's been logged and nothing upstack cares.
+    }
+}
+```
+
+最终调用了`bringUpServiceLocked`方法启动服务，这一部分可以看上一篇文章 [Android源码分析 - Service启动流程](https://juejin.cn/post/7276363520554795064) 中的分析，还记得上一篇文章中分析的`realStartServiceLocked`方法中，有一个逻辑是：如果`Service`已经启动，并且没有启动项，则构建一个假的启动参数供`onStartCommand`使用 吗？之前看到这个逻辑的时候我还有些疑惑为什么需要这样，现在就豁然开朗了，原来这是为`Service`重启做的逻辑，而对于返回值`START_REDELIVER_INTENT`而言，`pendingStarts`列表本身就不为空，直接正常执行启动任务就可以了
+
+# 总结
+
+至此，整个`Service`篇章就到此结束了，通过这次的写作，我自身也是受益匪浅，了解到了很多我以前不知道的知识，也纠正了一些我以前错误的认知，如果也能帮到正在看文章的你们，那就再好不过了
