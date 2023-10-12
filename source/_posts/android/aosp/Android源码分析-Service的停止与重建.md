@@ -19,6 +19,16 @@ categories:
 
 # 流程图
 
+由于`Service`的停止与重建在实际情况下会收到各种条件影响产生不同的情况，所以这里的流程图我也只画最简路径，以供大家参考
+
+![service主动停止流程图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Service%E7%9A%84%E5%81%9C%E6%AD%A2%E4%B8%8E%E9%87%8D%E5%BB%BA_service%E4%B8%BB%E5%8A%A8%E5%81%9C%E6%AD%A2%E6%B5%81%E7%A8%8B%E5%9B%BE.png)
+
+![service主动解绑流程图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Service%E7%9A%84%E5%81%9C%E6%AD%A2%E4%B8%8E%E9%87%8D%E5%BB%BA_service%E4%B8%BB%E5%8A%A8%E8%A7%A3%E7%BB%91%E6%B5%81%E7%A8%8B%E5%9B%BE.png)
+
+![Task移除流程图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Service%E7%9A%84%E5%81%9C%E6%AD%A2%E4%B8%8E%E9%87%8D%E5%BB%BA_Task%E7%A7%BB%E9%99%A4%E6%B5%81%E7%A8%8B%E5%9B%BE.png)
+
+![service重建流程图](https://raw.githubusercontent.com/dreamgyf/ImageStorage/master/Android%E6%BA%90%E7%A0%81%E5%88%86%E6%9E%90%20-%20Service%E7%9A%84%E5%81%9C%E6%AD%A2%E4%B8%8E%E9%87%8D%E5%BB%BA_service%E9%87%8D%E5%BB%BA%E6%B5%81%E7%A8%8B%E5%9B%BE.png)
+
 # 主动停止
 
 首先，我们来看主动停止的情况，主动停止也分三种：
@@ -1281,6 +1291,7 @@ void removeTask(Task task, boolean killProcess, boolean removeFromRecents, Strin
 这个方法最重要的有两个部分，一个是销毁此`Task`下所有`Activity`，对于我们本次而言不需要关注，另一个是调用`cleanUpRemovedTaskLocked`继续清理`Task`
 
 ```java
+//frameworks/base/services/core/java/com/android/server/wm/ActivityStackSupervisor.java
 void cleanUpRemovedTaskLocked(Task task, boolean killProcess, boolean removeFromRecents) {
     //从最近任务列表中移除
     //对于清除全部Task而言，之前在RecentTasks中已经进行过移除操作了
