@@ -29,6 +29,16 @@ override fun onCreate(savedInstanceState: Bundle?) {
 
 ---
 
+# TextView
+
+## 重新布局
+
+`TextView`在调用`setText`后不一定会走`requestLayout`方法，在某些情况下会导致显示异常，比如因`RecyclerView`复用导致长度不符合预期的问题
+
+解决方案：简单来说当`TextView`的`width`属性不为`WRAP_CONTENT`且文字高度没发生变化的情况下，它就不会重新布局，如果你需要它重新计算宽高的话，注意以上的条件，设置合适的属性即可，具体的源码分析可以参考 [从 TextView.setText() 看 requestLayout 和 invalidate 方法有什么不同](https://zhuanlan.zhihu.com/p/381485429) 这篇文章
+
+---
+
 # 滑动
 
 1. 滑动嵌套
