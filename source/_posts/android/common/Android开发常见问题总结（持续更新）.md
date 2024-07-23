@@ -37,6 +37,14 @@ override fun onCreate(savedInstanceState: Bundle?) {
 
 解决方案：简单来说当`TextView`的`width`属性不为`WRAP_CONTENT`且文字高度没发生变化的情况下，它就不会重新布局，如果你需要它重新计算宽高的话，注意以上的条件，设置合适的属性即可，具体的源码分析可以参考 [从 TextView.setText() 看 requestLayout 和 invalidate 方法有什么不同](https://zhuanlan.zhihu.com/p/381485429) 这篇文章
 
+## ellipse
+
+`TextView`在某些情况下，`ellipse`属性会失效
+
+- `setText`设置了`BufferType`为`NORMAL`以外的其他值
+
+- `TextView`设置了`MovementMethod`
+
 ---
 
 # 滑动
