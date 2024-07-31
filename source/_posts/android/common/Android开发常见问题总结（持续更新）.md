@@ -45,6 +45,10 @@ override fun onCreate(savedInstanceState: Bundle?) {
 
 - `TextView`设置了`MovementMethod`
 
+## layout
+
+通过`TextView`中的`android.text.Layout`，我们可以通过它计算很多东西，比如通过x ,y坐标去获取字符下标呀，或者通过字符下标去计算这个文字x坐标等等，但需要注意的是，`android.text.Layout`在计算的过程中不会去考虑`TextView`的`padding`，所以在开发的过程中我们自己需要进行一些处理，比如说通过x ,y坐标去获取字符下标的时候，传入的x, y值要减去`paddingLeft`，`paddingTop`，当通过字符下标去计算文字x坐标后，要再加上`paddingLeft`才是正确的x坐标
+
 ---
 
 # 滑动
