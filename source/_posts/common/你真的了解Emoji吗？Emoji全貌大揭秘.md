@@ -11,7 +11,7 @@ categories: 其他
 
 # 起因
 
-小红书里有一个AI聊天助手"达芬奇"，你可以向他提问，他会以流式打印的形式一字一字的将回答呈现给用户。在这过程中我就发现，每当打印到`Emoji`的时候，总会先出现一个问号形状的乱码，然后才能显示出`Emoji`，有的`Emoji`更奇特，以👨‍👩‍👧‍👦为例，在打印过程中会依此显示👨👩👧👦四个`Emoji`，最后突然啪的一下，合成一整个👨‍👩‍👧‍👦，是不是很神奇？这个现象引起了我的好奇，于是我开始翻阅资料，揭开`Emoji`的神秘面纱。
+最近项目里有一个AI聊天机器人，你可以向他提问，他会以流式打印的形式一字一字的将回答呈现给用户。在这过程中我就发现，每当打印到`Emoji`的时候，总会先出现一个问号形状的乱码，然后才能显示出`Emoji`，有的`Emoji`更奇特，以👨‍👩‍👧‍👦为例，在打印过程中会依此显示👨👩👧👦四个`Emoji`，最后突然啪的一下，合成一整个👨‍👩‍👧‍👦，是不是很神奇？这个现象引起了我的好奇，于是我开始翻阅资料，揭开`Emoji`的神秘面纱。
 
 # Emoji的起源及发展
 
@@ -222,7 +222,7 @@ class Character implements java.io.Serializable, Comparable<Character> {
 
 👨`U+1F468` + `U+200D` + 👩`U+1F469` + 👧`U+1F467` + 👦`U+1F466` = 👨‍👩‍👧‍👦
 
-这也就解释了在"达芬奇"流式打印文字的时候，为什么会依此显示👨👩👧👦四个`Emoji`，最后突然合成一整个👨‍👩‍👧‍👦了
+这也就解释了在AI聊天机器人流式打印文字的时候，为什么会依此显示👨👩👧👦四个`Emoji`，最后突然合成一整个👨‍👩‍👧‍👦了
 
 # Emoji字体
 
@@ -234,146 +234,9 @@ class Character implements java.io.Serializable, Comparable<Character> {
 
 ![不同平台下的Emoji样式](https://github.com/dreamgyf/ImageStorage/raw/master/你真的了解Emoji吗？Emoji全貌大揭秘_不同平台下的Emoji样式.png)
 
-# 回归初心，如何解决达芬奇流式打印问题
+# 回归初心，如何解决流式打印问题
 
-最后，让我们回到本文的出发点，了解了`Emoji`机制后，我们该如何解决"达芬奇"的流式打印问题呢？其实很简单，根据字符串向后做一个预测就可以了，啥叫预测？就是往后匹配，看这个字符的结构当前是否符合`Emoji`规则，以及加上后面的字符后有没有可能组成一个完整的`Emoji`，这里具体的代码我就不放了，给大家提供一个获取`Emoji`的代码吧，怎么预测可以通过这段代码自行感悟：
-
-```kotlin
-object EmojiUtils {
-
-    private const val VARIATION_SELECTOR_16 = 0xFE0F // 变体选择符-16
-    private const val COMBINING_ENCLOSING_KEY_CAP = 0x20E3 // 键帽符
-    private const val ZERO_WIDTH_JOINER = 0x200D // 零宽度连接符
-    private const val TERM_TAG = 0xE007F // 标签序列终止符
-
-    private const val KEY_CAP_START_CHARS = "#*0123456789" // 支持键帽符的所有字符
-
-    private val emojiModifierRange = 0x1F3FB..0x1F3FF // 肤色修饰符
-    private val tagModifierRange = 0xE0020..0xE007E // 标签序列
-    private val regionalIndicatorSymbolRange = 0x1F1E6..0x1F1FF // 区域指示符
-
-    private val basicEmojiSet = HashSet<Int>(4000) // 基本Emoji字符表
-
-    init {
-        basicEmojiSet.add(0x0023)
-        // ... 添加所有基本Emoji字符
-        // 使用 https://www.unicode.org/Public/UCD/latest/ucd/emoji/emoji-data.txt 数据
-    }
-
-    /**
-     *  返回值不为null则代表该段字符是Emoji
-     */
-    fun getEmoji(seq: CharSequence, start: Int, end: Int): CharSequence? {
-        if (start >= end) return null
-
-        var index = start
-        val firstCodePoint = Character.codePointAt(seq, index)
-        if (firstCodePoint >= 0x10000) {
-            index += 2
-        } else {
-            ++index
-        }
-
-        // 判断是否为旗帜
-        if (isRegionalIndicatorSymbol(firstCodePoint)) {
-            if (index >= end) return null
-            val nextCodePoint = Character.codePointAt(seq, index)
-            return if (isRegionalIndicatorSymbol(nextCodePoint)) {
-                seq.subSequence(start, index + 2)
-            } else {
-                null
-            }
-        }
-
-        // 是否为基本Emoji
-        if (!isBasicEmoji(firstCodePoint)) return null
-
-        // 查找后面的肤色修饰符、变体选择符-16、键帽符以及标签序列，并返回整体长度
-        val modifierLength = getModifierLength(seq, index, end)
-        index += modifierLength
-        if (index >= end) {
-            return if (modifierLength == 0 && isKeyCapStartChars(firstCodePoint)) {
-                null
-            } else {
-                seq.subSequence(start, end)
-            }
-        }
-
-        val nextCodePoint = Character.codePointAt(seq, index)
-        if (modifierLength == 0 && nextCodePoint != ZERO_WIDTH_JOINER && isKeyCapStartChars(firstCodePoint)) {
-            return null
-        }
-
-        // 如果后一个字符是零宽度连接符，则递归查找下一个子Emoji
-        return if (nextCodePoint == ZERO_WIDTH_JOINER) {
-            //连接符占一个字符
-            index++
-            val afterEmoji = getEmoji(seq, index, end)
-            if (afterEmoji == null) {
-                null
-            } else {
-                seq.subSequence(start, index + afterEmoji.length)
-            }
-        } else {
-            seq.subSequence(start, index)
-        }
-    }
-
-    /**
-     * 旗帜Emoji
-     */
-    private fun isRegionalIndicatorSymbol(codePoint: Int): Boolean {
-        return codePoint in regionalIndicatorSymbolRange
-    }
-
-    private fun isBasicEmoji(codePoint: Int): Boolean {
-        // 其实这里应该可以通过以下方法判断，但由于该方法的最低Api限制是Android N，
-        // 在项目中无法使用，所以这里通过自己添加基本Emoji的方式手动判断
-        // UCharacter.hasBinaryProperty(codePoint, UProperty.EMOJI)
-        return codePoint in basicEmojiSet
-    }
-
-    private fun getModifierLength(seq: CharSequence, start: Int, end: Int): Int {
-        if (start >= end) return 0
-
-        var index = start
-
-        var codePoint = Character.codePointAt(seq, index)
-
-        //肤色
-        if (codePoint in emojiModifierRange) return 2
-
-        if (codePoint == VARIATION_SELECTOR_16) {
-            return if (index + 2 < end) {
-                val nextCodePoint = Character.codePointAt(seq, index + 2)
-                if (nextCodePoint == COMBINING_ENCLOSING_KEY_CAP) {
-                    3
-                } else {
-                    2
-                }
-            } else {
-                2
-            }
-        }
-
-        while (codePoint in tagModifierRange) {
-            index += 2
-            if (index >= end) break
-            codePoint = Character.codePointAt(seq, index)
-        }
-
-        return if (index < end && index != start && codePoint == TERM_TAG) {
-            index - start
-        } else {
-            0
-        }
-    }
-
-    private fun isKeyCapStartChars(codePoint: Int): Boolean {
-        return KEY_CAP_START_CHARS.contains(codePoint.toChar())
-    }
-}
-```
+最后，让我们回到本文的出发点，了解了`Emoji`机制后，我们该如何解决AI聊天机器人的流式打印问题呢？其实很简单，根据字符串向后做一个预测就可以了，啥叫预测？就是往后匹配，看这个字符的结构当前是否符合`Emoji`规则，以及加上后面的字符后有没有可能组成一个完整的`Emoji`，这里具体的代码我就不放了，大家自行感悟吧😊
 
 # 参考文献
 
